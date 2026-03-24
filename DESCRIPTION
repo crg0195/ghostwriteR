@@ -1,0 +1,23 @@
+Package: ghostwriteR
+Type: Package
+Title: GhostwriteR: Visualize Script Data Flow
+Version: 0.0.1
+Authors@R: c(
+    person("crg0195", "maintainer", email = "crg0195@users.noreply.github.com", role = c("aut", "cre"))
+    )
+Description: GhostwriteR parses a single R script or SQL script and builds
+    a graph of data-flow edges across inputs, transformations, and outputs.
+URL: https://github.com/crg0195/ghostwriteR
+BugReports: https://github.com/crg0195/ghostwriteR/issues
+License: MIT + file LICENSE
+Encoding: UTF-8
+LazyData: true
+Roxygen: list(markdown = TRUE)
+RoxygenNote: 7.3.2
+Imports:
+    DiagrammeR
+Suggests:
+    DiagrammeRsvg,
+    rsvg,
+    testthat (>= 3.0.0)
+Config/testthat/edition: 3
