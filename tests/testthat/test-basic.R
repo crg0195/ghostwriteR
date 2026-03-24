@@ -128,3 +128,13 @@ test_that("basename path style reduces full file paths in parsed output", {
   expect_true(any(steps$target_path == "final.csv"))
   expect_false(any(grepl("/Users/example/private", steps$target_path, fixed = TRUE)))
 })
+
+test_that("unnamed callable transforms do not crash parsing", {
+  tmp <- tempfile(fileext = ".R")
+  writeLines(c(
+    'sales <- read.csv("sales.csv")',
+    'result <- (function(d) d)(sales)'
+  ), tmp)
+
+  expect_no_error(ghostwriteR:::ghostwriter_parse(tmp))
+})

@@ -3372,6 +3372,15 @@ is_known_call <- function(fn, known, known_base) {
 }
 
 plain_fn <- function(fn) {
+  if (is.null(fn) || length(fn) == 0L) {
+    return("")
+  }
+
+  fn <- trim_ws(fn[[1]])
+  if (!nzchar(fn)) {
+    return("")
+  }
+
   sub("^[^:]+::", "", fn)
 }
 
@@ -3423,6 +3432,8 @@ display_path_value <- function(path_value) {
 
 human_action <- function(fn) {
   fn <- plain_fn(fn)
+
+  if (!nzchar(fn)) return("Transform data")
 
   if (fn %in% c("read.csv", "read_csv")) return("Load CSV file")
   if (fn %in% c("read_tsv")) return("Load tab-delimited file")
