@@ -138,3 +138,57 @@ test_that("unnamed callable transforms do not crash parsing", {
 
   expect_no_error(ghostwriteR:::ghostwriter_parse(tmp))
 })
+
+test_that("R parser recognizes discovered JSON files and list-based imports", {
+  tmp <- tempfile(fileext = ".R")
+  writeLines(c(
+    'files <- dir("data/spotify", pattern = "\\\\.json", full.names = TRUE)',
+    'df_list <- vector("list", length(files))',
+    'for (i in seq_along(files)) {',
+    '  df_list[[i]] <- fromJSON(files[[i]], flatten = TRUE)',
+    '}',
+    'streamingData1 <- bind_rows(df_list)'
+  ), tmp)
+
+  parsed <- ghostwriteR:::ghostwriter_parse(tmp)
+  steps <- parsed$steps
+
+  discover_step <- steps[steps$title == "Discover source data files", , drop = FALSE]
+  import_step <- steps[steps$title == "Load JSON files", , drop = FALSE]
+  combine_step <- steps[steps$title == "Combine imported files", , drop = FALSE]
+
+  expect_equal(nrow(discover_step), 1)
+  expect_equal(nrow(import_step), 1)
+  expect_equal(nrow(combine_step), 1)
+  expect_true(discover_step$step[[1]] < import_step$step[[1]])
+  expect_true(import_step$step[[1]] < combine_step$step[[1]])
+  expect_match(discover_step$detail[[1]], "JSON files", fixed = TRUE)
+  expect_match(import_step$detail[[1]], "read the JSON files listed in `files`", fixed = TRUE)
+  expect_equal(import_step$output[[1]], "df_list")
+  expect_equal(combine_step$source[[1]], "df_list")
+  expect_equal(combine_step$output[[1]], "streamingData1")
+})
+
+test_that("R parser handles magrittr pipes and older tidyverse verbs cleanly", {
+  tmp <- tempfile(fileext = ".R")
+  writeLines(c(
+    'library(jsonlite)',
+    'files <- dir("data/spotify", pattern = "\\\\.json", full.names = TRUE)',
+    'df_list <- vector("list", length(files))',
+    'for (i in seq_along(files)) {',
+    '  df_list[[i]] <- fromJSON(files[[i]], flatten = TRUE)',
+    '}',
+    'streamingData1 <- bind_rows(df_list)',
+    'streamingData1 %<>% filter(!artist %in% blocked_artists)',
+    'streamingData <- streamingData1 %>% as_tibble() %>% mutate_at("ts", ymd_hms) %>% mutate(date = floor_date(ts, "day") %>% as_date)'
+  ), tmp)
+
+  parsed <- ghostwriteR:::ghostwriter_parse(tmp)
+  steps <- parsed$steps
+
+  expect_true(any(steps$title == "Filter rows" & steps$output == "streamingData1"))
+  expect_true(any(steps$title == "Convert to data frame"))
+  expect_true(any(steps$title == "Add or change columns" & grepl("update ts using ymd_hms", steps$detail, fixed = TRUE)))
+  expect_true(any(grepl('date = floor_date\\(ts, "day"\\) then as_date', steps$detail)))
+  expect_true(any(grepl("artist is not in blocked_artists", steps$detail, fixed = TRUE)))
+})
