@@ -1,5 +1,12 @@
 # ghostwriteR news
 
+## ghostwriteR 0.0.3
+
+- Aligned package version metadata with the latest GitHub release tag.
+- Added path-display controls for safer sharing of generated output.
+- Added clearer README guidance for GitHub installs and public sharing.
+- Added a friendlier DOCX export error when a zip utility is unavailable.
+
 ## ghostwriteR 0.0.1
 
 - Initial public GitHub release.
