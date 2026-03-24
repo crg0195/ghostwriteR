@@ -123,6 +123,7 @@ test_that("basename path style reduces full file paths in parsed output", {
 
   parsed <- ghostwriteR:::ghostwriter_parse(tmp)
   steps <- parsed$steps
+  stats <- ghostwriteR:::workflow_stats(parsed)
 
   expect_true(any(steps$target_path == "sales.csv"))
   expect_true(any(steps$target_path == "final.csv"))
@@ -152,6 +153,7 @@ test_that("R parser recognizes discovered JSON files and list-based imports", {
 
   parsed <- ghostwriteR:::ghostwriter_parse(tmp)
   steps <- parsed$steps
+  stats <- ghostwriteR:::workflow_stats(parsed)
 
   discover_step <- steps[steps$title == "Discover source data files", , drop = FALSE]
   import_step <- steps[steps$title == "Load JSON files", , drop = FALSE]
@@ -167,6 +169,7 @@ test_that("R parser recognizes discovered JSON files and list-based imports", {
   expect_equal(import_step$output[[1]], "df_list")
   expect_equal(combine_step$source[[1]], "df_list")
   expect_equal(combine_step$output[[1]], "streamingData1")
+  expect_equal(stats$inputs, 1)
 })
 
 test_that("R parser handles magrittr pipes and older tidyverse verbs cleanly", {
@@ -191,4 +194,61 @@ test_that("R parser handles magrittr pipes and older tidyverse verbs cleanly", {
   expect_true(any(steps$title == "Add or change columns" & grepl("update ts using ymd_hms", steps$detail, fixed = TRUE)))
   expect_true(any(grepl('date = floor_date\\(ts, "day"\\) then as_date', steps$detail)))
   expect_true(any(grepl("artist is not in blocked_artists", steps$detail, fixed = TRUE)))
+})
+
+test_that("R parser ignores commented-out pipe fragments and captures standalone workflow calls", {
+  tmp <- tempfile(fileext = ".R")
+  writeLines(c(
+    'library(echarts4r)',
+    'season <- data.frame(season = c("Winter", "Spring"), minutes = c(10, 20), songs = c(1, 2))',
+    'e_common(font_family = "Sans", theme = NULL)',
+    'songs <- season %>% filter(minutes >= 10) %>%',
+    '  group_by(season) %>%',
+    '  # group_by(date = floor_date(date, "month")) %>%',
+    '  summarise(songs = n()) %>%',
+    '  arrange(desc(songs)) %>%',
+    '  e_charts(season) |>',
+    '  e_bar(songs, name = "Songs") |>',
+    '  # e_step(minutes, name = "Broken|>") |>',
+    '  e_title("Total Song Listening per Season", subtext = "From 2014-2023")',
+    'songs',
+    'mins <- season %>% count(season, sort = TRUE)',
+    'e_arrange(mins, songs)',
+    'season %>% count(minutes, sort = TRUE)',
+    'season %>% count(songs, sort = TRUE)'
+  ), tmp)
+
+  parsed <- ghostwriteR:::ghostwriter_parse(tmp)
+  steps <- parsed$steps
+
+  expect_false(any(grepl("Broken", steps$detail, fixed = TRUE)))
+  expect_false(any(grepl("floor_date\\(date, \"month\"\\)", steps$detail)))
+  expect_true(any(steps$title == "Set chart defaults"))
+  expect_true(any(steps$title == "Arrange charts"))
+  expect_true(sum(steps$title == "Count records") >= 3)
+  expect_true(any(steps$title == "Display object" & steps$source == "songs"))
+})
+
+test_that("R parser marks overwritten objects as replaced later", {
+  tmp <- tempfile(fileext = ".R")
+  writeLines(c(
+    'season <- streamingData %>% mutate(season = season(date))',
+    'season <- streamingData %>% mutate(season = case_when(season(date) == "DJF" ~ "Winter", .default = "UNK"))',
+    'season_counts <- season %>% count(master_metadata_album_artist_name, sort = TRUE)',
+    'season_counts <- season %>% group_by(master_metadata_album_artist_name) %>% summarise(sum = sum(minutes))'
+  ), tmp)
+
+  parsed <- ghostwriteR:::ghostwriter_parse(tmp)
+  steps <- parsed$steps
+
+  season_steps <- steps[steps$output == "season", , drop = FALSE]
+  counts_steps <- steps[steps$output == "season_counts", , drop = FALSE]
+
+  expect_equal(nrow(season_steps), 2)
+  expect_equal(nrow(counts_steps), 2)
+  expect_true(nzchar(season_steps$superseded_by[[1]]))
+  expect_equal(season_steps$superseded_by[[1]], as.character(season_steps$step[[2]]))
+  expect_true(grepl("replaced later at step", season_steps$detail[[1]], fixed = TRUE))
+  expect_true(nzchar(counts_steps$superseded_by[[1]]))
+  expect_equal(counts_steps$superseded_by[[1]], as.character(counts_steps$step[[2]]))
 })

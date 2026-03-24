@@ -266,6 +266,7 @@ ghostwriter_parse_r <- function(path) {
     output_columns = character(),
     carried_columns = character(),
     created_columns = character(),
+    superseded_by = character(),
     narrative = character(),
     stringsAsFactors = FALSE
   )
@@ -334,7 +335,7 @@ ghostwriter_parse_r <- function(path) {
     )
   }
 
-  add_step_record <- function(kind, title, detail = "", source = "", output = "", target_path = "", group = "", input_columns = "", output_columns = "", carried_columns = "", created_columns = "") {
+  add_step_record <- function(kind, title, detail = "", source = "", output = "", target_path = "", group = "", input_columns = "", output_columns = "", carried_columns = "", created_columns = "", superseded_by = "") {
     step_index <<- step_index + 1L
     narrative <- build_step_narrative(kind, title, detail, source, output, target_path)
 
@@ -353,6 +354,7 @@ ghostwriter_parse_r <- function(path) {
         output_columns = output_columns,
         carried_columns = carried_columns,
         created_columns = created_columns,
+        superseded_by = superseded_by,
         narrative = narrative,
         stringsAsFactors = FALSE
       )
@@ -711,7 +713,47 @@ ghostwriter_parse_r <- function(path) {
       next
     }
 
+    pipe_parts <- split_pipe(statement)
+    if (length(pipe_parts) > 1L) {
+      source_info <- source_from_expr(pipe_parts[[1]])
+      current_id <- source_info$node_id
+      current_source <- if (nzchar(source_info$source_label)) source_info$source_label else label_from_expr(pipe_parts[[1]])
+      tail_parts <- pipe_parts[-1]
+
+      for (part in tail_parts) {
+        info <- describe_transform(part, source_in_call = FALSE)
+        step_id <- add_step_record(
+          kind = "transform",
+          title = info$title,
+          detail = info$detail,
+          source = current_source,
+          output = ""
+        )
+        add_edge(current_id, step_id, "flows")
+        current_id <- step_id
+        current_source <- "the result from the previous step"
+      }
+      next
+    }
+
+    if (is_plain_name(statement)) {
+      source_id <- object_node(statement)
+      step_id <- add_step_record(
+        kind = "transform",
+        title = "Display object",
+        detail = paste0("show `", statement, "` for review"),
+        source = statement,
+        output = ""
+      )
+      add_edge(source_id, step_id, "displays")
+      next
+    }
+
     fn <- leading_call(statement)
+    if (!is.null(fn) && plain_fn(fn) %in% c("library", "require")) {
+      next
+    }
+
     if (is_known_call(fn, output_funs, output_funs_base)) {
       info <- describe_output(statement)
       source_expr <- info$source_expr %||% ""
@@ -729,9 +771,25 @@ ghostwriter_parse_r <- function(path) {
       if (!is.null(info$path)) {
         add_edge(step_id, file_node(info$path, "output_file"), "writes")
       }
+      next
+    }
+
+    if (!is.null(fn)) {
+      info <- describe_transform(statement, source_in_call = TRUE)
+      source_label <- if (nzchar(info$source)) info$source else first_plain_arg(statement)
+      source_id <- if (nzchar(source_label)) object_node(source_label) else NULL
+      step_id <- add_step_record(
+        kind = "transform",
+        title = info$title,
+        detail = info$detail,
+        source = source_label,
+        output = ""
+      )
+      add_edge(source_id, step_id, "flows")
     }
   }
 
+  steps <- annotate_superseded_steps(steps)
   edges <- unique(edges)
   list(nodes = nodes, edges = edges, steps = steps, script_path = path, language = "r")
 }
@@ -1486,6 +1544,49 @@ build_step_narrative <- function(kind, title, detail = "", source = "", output =
   paste0(title, detail_clause, ".")
 }
 
+annotate_superseded_steps <- function(steps) {
+  if (nrow(steps) == 0L || !("output" %in% names(steps))) {
+    return(steps)
+  }
+
+  outputs <- trim_ws(steps$output)
+  steps$superseded_by[is.na(steps$superseded_by)] <- ""
+
+  repeated_outputs <- unique(outputs[nzchar(outputs) & duplicated(outputs, fromLast = TRUE)])
+  if (length(repeated_outputs) == 0L) {
+    return(steps)
+  }
+
+  for (output_name in repeated_outputs) {
+    indices <- which(outputs == output_name)
+    if (length(indices) < 2L) {
+      next
+    }
+
+    for (position in seq_len(length(indices) - 1L)) {
+      current_index <- indices[[position]]
+      next_index <- indices[[position + 1L]]
+      replacement_step <- as.character(steps$step[[next_index]])
+      note <- paste0("this version is replaced later at step ", replacement_step)
+
+      steps$superseded_by[[current_index]] <- replacement_step
+      steps$detail[[current_index]] <- if (nzchar(trim_ws(steps$detail[[current_index]]))) {
+        paste0(steps$detail[[current_index]], "; ", note)
+      } else {
+        paste0("This version is replaced later at step ", replacement_step)
+      }
+      steps$narrative[[current_index]] <- paste0(
+        sub("\\.$", "", steps$narrative[[current_index]]),
+        ". This version is replaced later at step ",
+        replacement_step,
+        "."
+      )
+    }
+  }
+
+  steps
+}
+
 object_kind_label <- function(kind, count = 1L, capitalize = TRUE) {
   base <- switch(
     kind,
@@ -2133,9 +2234,12 @@ workflow_stats <- function(parsed) {
   nodes <- parsed$nodes
   object_counts <- named_object_kind_counts(nodes)
   object_total <- sum(object_counts)
+  input_paths <- unique(steps$target_path[steps$kind == "input" & nzchar(steps$target_path)])
+  input_nodes <- unique(nodes$key[nodes$kind %in% c("input_file", "source_table")])
+  source_count <- length(unique(c(input_paths, input_nodes)))
 
   list(
-    inputs = sum(nodes$kind %in% c("input_file", "source_table")),
+    inputs = source_count,
     datasets = object_total,
     object_counts = object_counts,
     object_label = named_object_stat_label(object_counts),
@@ -2274,7 +2378,7 @@ step_phase_label <- function(step_row) {
     return("Scoring")
   }
 
-  if (grepl("create chart|add chart layer|label chart|style chart", text, perl = TRUE)) {
+  if (grepl("create chart|add chart layer|label chart|style chart|set chart defaults|arrange charts", text, perl = TRUE)) {
     return("Visualization")
   }
 
@@ -2282,7 +2386,7 @@ step_phase_label <- function(step_row) {
     return("Joins")
   }
 
-  if (grepl("group rows|summarize data|calculate summary metrics|average of|row count|number of distinct|return a regular table without grouping", text, perl = TRUE)) {
+  if (grepl("group rows|summarize data|count records|calculate summary metrics|average of|row count|number of distinct|return a regular table without grouping", text, perl = TRUE)) {
     return("Aggregation")
   }
 
@@ -2299,6 +2403,10 @@ step_phase_label <- function(step_row) {
   }
 
   if (grepl("^run ", tolower(step$title))) {
+    return("Analysis")
+  }
+
+  if (grepl("display object", text, perl = TRUE)) {
     return("Analysis")
   }
 
@@ -2434,6 +2542,7 @@ build_timeline_step_button <- function(step_row, active = FALSE, hidden = FALSE)
     '" data-output-columns="', html_escape(step$output_columns),
     '" data-carried-columns="', html_escape(step$carried_columns),
     '" data-created-columns="', html_escape(step$created_columns),
+    '" data-superseded-by="', html_escape(step$superseded_by),
     '">',
     '<span class="timeline-step__number">', step$step, '</span>',
     '<span class="timeline-step__body">',
@@ -2486,6 +2595,7 @@ build_html_detail_panel <- function(steps) {
     build_detail_meta_row('Source', step$source, 'detailSource'),
     build_detail_meta_row('Output', step$output, 'detailOutput'),
     build_detail_meta_row('Saved to', step$target_path, 'detailTarget'),
+    build_detail_meta_row('Replaced later', if (nzchar(step$superseded_by)) paste0("Step ", step$superseded_by) else "", 'detailSuperseded'),
     build_detail_meta_row('Input columns used', step$input_columns, 'detailInputColumns'),
     build_detail_meta_row('Output columns produced', step$output_columns, 'detailOutputColumns'),
     build_detail_meta_row('Columns carried through', step$carried_columns, 'detailCarriedColumns'),
@@ -3137,6 +3247,8 @@ html_page_js <- function() {
     '    output: document.getElementById("detailOutput"),',
     '    targetRow: document.getElementById("detailTargetRow"),',
     '    target: document.getElementById("detailTarget"),',
+    '    supersededRow: document.getElementById("detailSupersededRow"),',
+    '    superseded: document.getElementById("detailSuperseded"),',
     '    inputColumnsRow: document.getElementById("detailInputColumnsRow"),',
     '    inputColumns: document.getElementById("detailInputColumns"),',
     '    outputColumnsRow: document.getElementById("detailOutputColumnsRow"),',
@@ -3197,6 +3309,7 @@ html_page_js <- function() {
     '    setMeta(detailMap.sourceRow, detailMap.source, button.dataset.source || "");',
     '    setMeta(detailMap.outputRow, detailMap.output, button.dataset.output || "");',
     '    setMeta(detailMap.targetRow, detailMap.target, button.dataset.target || "");',
+    '    setMeta(detailMap.supersededRow, detailMap.superseded, button.dataset.supersededBy ? ("Step " + button.dataset.supersededBy) : "");',
     '    setMeta(detailMap.inputColumnsRow, detailMap.inputColumns, button.dataset.inputColumns || "");',
     '    setMeta(detailMap.outputColumnsRow, detailMap.outputColumns, button.dataset.outputColumns || "");',
     '    setMeta(detailMap.carriedColumnsRow, detailMap.carriedColumns, button.dataset.carriedColumns || "");',
@@ -3397,15 +3510,57 @@ docx_paragraph <- function(text, style = "Normal") {
 
 expression_text <- function(expr, srcref) {
   if (!is.null(srcref)) {
-    return(compact_ws(paste(as.character(srcref), collapse = "\n")))
+    return(compact_ws(strip_inline_comments(paste(as.character(srcref), collapse = "\n"))))
   }
 
-  compact_ws(paste(deparse(expr), collapse = " "))
+  compact_ws(strip_inline_comments(paste(deparse(expr), collapse = " ")))
 }
 
 compact_ws <- function(text) {
   text <- gsub("\\s+", " ", text)
   trim_ws(text)
+}
+
+strip_inline_comments <- function(text) {
+  chars <- strsplit(text, "", fixed = TRUE)[[1]]
+  pieces <- character()
+  quote_char <- ""
+  in_comment <- FALSE
+
+  for (index in seq_along(chars)) {
+    char <- chars[[index]]
+
+    if (in_comment) {
+      if (char == "\n") {
+        in_comment <- FALSE
+        pieces <- c(pieces, char)
+      }
+      next
+    }
+
+    if (nzchar(quote_char)) {
+      pieces <- c(pieces, char)
+      if (char == quote_char && (index == 1L || chars[[index - 1L]] != "\\")) {
+        quote_char <- ""
+      }
+      next
+    }
+
+    if (char %in% c("\"", "'")) {
+      quote_char <- char
+      pieces <- c(pieces, char)
+      next
+    }
+
+    if (char == "#") {
+      in_comment <- TRUE
+      next
+    }
+
+    pieces <- c(pieces, char)
+  }
+
+  paste(pieces, collapse = "")
 }
 
 trim_ws <- function(x) {
@@ -3634,7 +3789,7 @@ human_action <- function(fn) {
   if (fn %in% c("readRDS")) return("Load R data file")
   if (fn %in% c("fromJSON")) return("Load JSON file")
   if (fn %in% c("dbGetQuery")) return("Run database query")
-  if (fn %in% c("c")) return("Create reference list")
+  if (fn %in% c("c")) return("Create reference vector")
   if (fn %in% c("dir", "list.files")) return("Discover source data files")
   if (fn %in% c("vector")) return("Prepare collection")
   if (fn %in% c("bind_rows")) return("Combine imported files")
@@ -3664,6 +3819,8 @@ human_action <- function(fn) {
   if (fn %in% c("e_bar", "e_line", "e_scatter", "e_area", "e_pie")) return("Add chart layer")
   if (fn %in% c("e_title")) return("Label chart")
   if (fn %in% c("e_legend", "e_color", "e_tooltip", "e_labels")) return("Style chart")
+  if (fn %in% c("e_common")) return("Set chart defaults")
+  if (fn %in% c("e_arrange")) return("Arrange charts")
   if (grepl("^geom_", fn)) return("Add chart layer")
   if (fn %in% c("labs")) return("Label chart")
   if (grepl("^theme", fn)) return("Style chart")
@@ -3720,7 +3877,7 @@ r_object_kind_from_transform <- function(text, fn = leading_call(text)) {
     return("data_frame")
   }
 
-  if (fn %in% c("e_charts", "e_bar", "e_line", "e_scatter", "e_area", "e_pie", "e_title", "e_legend", "e_color", "e_tooltip", "e_labels")) {
+  if (fn %in% c("e_charts", "e_bar", "e_line", "e_scatter", "e_area", "e_pie", "e_title", "e_legend", "e_color", "e_tooltip", "e_labels", "e_common", "e_arrange")) {
     return("plot_object")
   }
 
@@ -4085,7 +4242,7 @@ transform_detail <- function(fn, args, raw_text = "") {
   }
 
   if (fn %in% c("c")) {
-    return("store these values as a reusable list")
+    return("store these values as a reusable vector")
   }
 
   if (fn %in% c("vector") && length(args) > 0L) {
@@ -4137,6 +4294,15 @@ transform_detail <- function(fn, args, raw_text = "") {
 
   if (fn == "e_tooltip") {
     return("configure the chart tooltip behavior")
+  }
+
+  if (fn == "e_common") {
+    return("set default chart fonts and theme options for later charts")
+  }
+
+  if (fn == "e_arrange") {
+    chart_names <- if (length(args) > 0L) paste(vapply(args, humanize_expression, character(1)), collapse = ", ") else "the selected charts"
+    return(paste0("arrange ", chart_names, " into a shared display"))
   }
 
   if (grepl("^geom_", fn)) {
@@ -4225,7 +4391,7 @@ describe_transform <- function(text, source_in_call = TRUE) {
   args <- call_args(text)
   source <- ""
 
-  if (isTRUE(source_in_call) && length(args) > 0 && is_plain_name(args[[1]])) {
+  if (isTRUE(source_in_call) && length(args) > 0 && is_plain_name(args[[1]]) && !fn_plain %in% c("e_arrange")) {
     source <- args[[1]]
     args <- args[-1]
   } else if (fn_plain %in% c("lm", "glm", "ggplot")) {
