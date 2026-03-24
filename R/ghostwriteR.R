@@ -3063,7 +3063,10 @@ write_docx_report <- function(parsed, out) {
     unlink(out)
   }
 
+  zip_binary <- resolve_zip_binary()
+
   utils::zip(
+    zip = zip_binary,
     zipfile = normalizePath(out, winslash = "/", mustWork = FALSE),
     files = c(
       "[Content_Types].xml",
@@ -3076,6 +3079,23 @@ write_docx_report <- function(parsed, out) {
   )
 
   invisible(out)
+}
+
+resolve_zip_binary <- function() {
+  candidates <- unique(c(
+    Sys.getenv("R_ZIPCMD", unset = ""),
+    unname(Sys.which("zip"))
+  ))
+  candidates <- candidates[nzchar(candidates)]
+
+  if (length(candidates) == 0L) {
+    stop(
+      "DOCX export requires a zip utility. Install a zip executable or set R_ZIPCMD to a valid zip command before using format = \"docx\".",
+      call. = FALSE
+    )
+  }
+
+  candidates[[1L]]
 }
 
 docx_content_types_xml <- function() {
@@ -3374,7 +3394,7 @@ pretty_path <- function(path_value) {
     return("Unknown path")
   }
 
-  path_value <- trim_ws(path_value)
+  path_value <- display_path_value(path_value)
   parent <- dirname(path_value)
   file <- basename(path_value)
 
@@ -3383,6 +3403,22 @@ pretty_path <- function(path_value) {
   }
 
   paste(file, paste0("from ", parent), sep = "\n")
+}
+
+display_path_value <- function(path_value) {
+  if (is.null(path_value) || !nzchar(trim_ws(path_value))) {
+    return(path_value)
+  }
+
+  style <- getOption("ghostwriteR.path_style", "full")
+  style <- match.arg(style, c("full", "basename"))
+  path_value <- trim_ws(path_value)
+
+  if (identical(style, "basename")) {
+    return(basename(path_value))
+  }
+
+  path_value
 }
 
 human_action <- function(fn) {
@@ -3801,7 +3837,7 @@ transform_detail <- function(fn, args, raw_text = "") {
 
 describe_input <- function(text) {
   fn <- leading_call(text)
-  path_value <- extract_string_literal(text)
+  path_value <- display_path_value(extract_string_literal(text))
   list(
     title = human_action(fn),
     detail = pretty_path(path_value),
@@ -3835,6 +3871,7 @@ describe_output <- function(text) {
   } else {
     extract_string_literal(text)
   }
+  path_value <- display_path_value(path_value)
 
   source_expr <- if (fn_plain == "ggsave") {
     plot_arg <- named_arg_value(args, "plot")
@@ -4267,11 +4304,12 @@ sql_output_info <- function(statement) {
   )
   copy_hit <- regmatches(statement, copy_match)[[1]]
   if (length(copy_hit) >= 2L) {
+    export_path <- display_path_value(copy_hit[[2]])
     return(list(
       title = "Export query results",
-      detail = pretty_path(copy_hit[[2]]),
+      detail = pretty_path(export_path),
       name = "",
-      path = copy_hit[[2]],
+      path = export_path,
       is_temporary = FALSE
     ))
   }
@@ -4283,11 +4321,12 @@ sql_output_info <- function(statement) {
   )
   unload_hit <- regmatches(statement, unload_match)[[1]]
   if (length(unload_hit) >= 2L) {
+    export_path <- display_path_value(unload_hit[[2]])
     return(list(
       title = "Export query results",
-      detail = pretty_path(unload_hit[[2]]),
+      detail = pretty_path(export_path),
       name = "",
-      path = unload_hit[[2]],
+      path = export_path,
       is_temporary = FALSE
     ))
   }

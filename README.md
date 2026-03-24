@@ -9,6 +9,10 @@ Visualize R and SQL workflow logic as shareable diagrams and handoff documents.
 - exports self-contained HTML handoff pages that are easy to share
 - generates plain-language workflow reports for technical and non-technical readers
 
+For R scripts, ghostwriteR uses parsing via `parse()` rather than `source()`
+or `eval()`, so it reads workflow structure without intentionally running the
+script itself.
+
 ## Install
 
 ```r
@@ -63,6 +67,14 @@ ghostwriter_bundle(path, graph_format = "html", report_format = "markdown")
 
 - Do not commit proprietary scripts, real data extracts, API keys, passwords,
   or local machine paths.
+- Generated HTML and report outputs can include literal file paths, table
+  names, and column names that appear in the source script.
+- If you want file paths reduced to just filenames in generated output, set:
+
+```r
+options(ghostwriteR.path_style = "basename")
+```
+
 - Review generated reports before sharing if the source script names sensitive
   files, tables, or business logic.
 - For coordinated releases to colleagues, prefer a tagged GitHub release over

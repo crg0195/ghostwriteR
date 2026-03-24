@@ -110,3 +110,21 @@ test_that("R workflow phases respect phase_rank order instead of alphabetical or
     c("Inputs", "Cleaning", "Feature engineering", "Joins", "Aggregation", "Modeling", "Scoring", "Visualization", "Outputs")
   )
 })
+
+test_that("basename path style reduces full file paths in parsed output", {
+  old_options <- options(ghostwriteR.path_style = "basename")
+  on.exit(options(old_options), add = TRUE)
+
+  tmp <- tempfile(fileext = ".R")
+  writeLines(c(
+    'sales <- read.csv("/Users/example/private/sales.csv")',
+    'write.csv(sales, "/Users/example/private/output/final.csv")'
+  ), tmp)
+
+  parsed <- ghostwriteR:::ghostwriter_parse(tmp)
+  steps <- parsed$steps
+
+  expect_true(any(steps$target_path == "sales.csv"))
+  expect_true(any(steps$target_path == "final.csv"))
+  expect_false(any(grepl("/Users/example/private", steps$target_path, fixed = TRUE)))
+})
