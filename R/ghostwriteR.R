@@ -1,8 +1,9 @@
-#' Visualize data flow in an R script
+#' Visualize workflow logic in an R or SQL script
 #'
-#' @param path Path to an R script file.
+#' @param path Path to an R or SQL script file.
 #' @param format Output format. Use `"graph"` to return a DiagrammeR graph
-#'   object, or `"html"`, `"svg"`, `"png"`, or `"pdf"` to write a file.
+#'   object, or `"html"`, `"html_graph"`, `"svg"`, `"png"`, or `"pdf"` to
+#'   write a file.
 #' @param out Output file path. Required when `format` is not `"graph"`.
 #' @return A DiagrammeR grViz object when `format = "graph"`. Otherwise,
 #'   invisibly returns the written file path.
@@ -21,9 +22,9 @@ ghostwriteR <- function(path, format = c("graph", "html", "html_graph", "svg", "
   invisible(out)
 }
 
-#' Build a written explanation of an R script workflow
+#' Build a written explanation of an R or SQL workflow
 #'
-#' @param path Path to an R script file.
+#' @param path Path to an R or SQL script file.
 #' @param format Output format for the report: `"markdown"`, `"text"`, or
 #'   `"docx"`.
 #' @param out Optional file path to write the report.
@@ -53,7 +54,7 @@ ghostwriter_report <- function(path, format = c("markdown", "text", "docx"), out
 
 #' Export a diagram and written report together
 #'
-#' @param path Path to an R script file.
+#' @param path Path to an R or SQL script file.
 #' @param dir Output directory for the bundle. Defaults to a folder beside the
 #'   script named `<script-name>-ghostwriteR`.
 #' @param graph_format File format for the diagram: `"html"`, `"png"`,
@@ -90,9 +91,9 @@ ghostwriter_bundle <- function(path,
   )
 }
 
-#' Extract data-flow edges from an R script
+#' Extract data-flow edges from an R or SQL script
 #'
-#' @param path Path to an R script file.
+#' @param path Path to an R or SQL script file.
 #' @return A data frame with columns `from`, `to`, and `type`.
 #' @export
 ghostwriter_edges <- function(path) {
@@ -1326,7 +1327,7 @@ object_kind_label <- function(kind, count = 1L, capitalize = TRUE) {
 
 named_object_kind_counts <- function(nodes) {
   object_kinds <- c("dataset", "data_table", "data_frame", "model_object", "plot_object", "matrix_object", "vector_object", "generic_object")
-  counts <- setNames(integer(length(object_kinds)), object_kinds)
+  counts <- stats::setNames(integer(length(object_kinds)), object_kinds)
 
   if (!("kind" %in% names(nodes)) || nrow(nodes) == 0L) {
     return(counts)
@@ -2166,7 +2167,7 @@ build_phase_overview_card <- function(phase, indices, steps) {
 }
 
 build_overview_preview <- function(indices, steps, limit = 3L) {
-  preview_indices <- head(indices, limit)
+  preview_indices <- utils::head(indices, limit)
   items <- paste(vapply(preview_indices, function(i) {
     paste0('<li>', html_escape(steps$title[[i]]), '</li>')
   }, character(1)), collapse = "")
@@ -2268,7 +2269,7 @@ build_timeline_inventory_meta <- function(step_row) {
     pieces <- c(pieces, paste0(count, " out"))
   }
 
-  paste0('<span class="timeline-step__inventory">', html_escape(paste(pieces, collapse = " • ")), '</span>')
+  paste0('<span class="timeline-step__inventory">', html_escape(paste(pieces, collapse = " | ")), '</span>')
 }
 
 build_html_detail_panel <- function(steps) {
@@ -2380,7 +2381,7 @@ build_inventory_card <- function(step_row, mode = c("named", "step")) {
   title <- if (identical(mode, "named")) inventory_subject_label(step_row) else paste0("Step ", step$step, ": ", step$title)
   eyebrow <- if (identical(mode, "named")) inventory_subject_type(step_row) else step_phase_label(step_row)
   meta <- if (identical(mode, "named")) {
-    paste0("Step ", step$step, " • ", step$title)
+    paste0("Step ", step$step, " | ", step$title)
   } else {
     piece <- character()
     if (nzchar(step$output)) {
@@ -2389,7 +2390,7 @@ build_inventory_card <- function(step_row, mode = c("named", "step")) {
     if (nzchar(step$target_path)) {
       piece <- c(piece, paste0("Saves to ", pretty_path(step$target_path)))
     }
-    if (length(piece) == 0L) paste0("Workflow step ", step$step) else paste(piece, collapse = " • ")
+    if (length(piece) == 0L) paste0("Workflow step ", step$step) else paste(piece, collapse = " | ")
   }
 
   counts <- character()
@@ -2399,7 +2400,7 @@ build_inventory_card <- function(step_row, mode = c("named", "step")) {
   if (nzchar(step$output_columns)) {
     counts <- c(counts, paste0(inventory_count(step$output_columns), " output column", plural_suffix(inventory_count(step$output_columns))))
   }
-  count_line <- if (length(counts) > 0L) paste(counts, collapse = " • ") else ""
+  count_line <- if (length(counts) > 0L) paste(counts, collapse = " | ") else ""
 
   paste0(
     '<article class="inventory-card">',
@@ -4920,7 +4921,7 @@ sql_select_detail <- function(select_items) {
     return("return all columns from the selected source tables")
   }
 
-  preview <- head(select_items, 5L)
+  preview <- utils::head(select_items, 5L)
   detail <- paste(vapply(preview, sql_select_item_detail, character(1)), collapse = "; ")
   if (length(select_items) > length(preview)) {
     detail <- paste0(detail, "; plus ", length(select_items) - length(preview), " more selected fields")

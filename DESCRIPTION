@@ -1,19 +1,23 @@
 Package: ghostwriteR
 Type: Package
-Title: GhostwriteR: Visualize Script Data Flow
+Title: Translate R and SQL Workflows into Diagrams and Handoff Documents
 Version: 0.0.1
 Authors@R: c(
     person("crg0195", "maintainer", email = "crg0195@users.noreply.github.com", role = c("aut", "cre"))
     )
-Description: GhostwriteR parses a single R script or SQL script and builds
-    a graph of data-flow edges across inputs, transformations, and outputs.
+Description: Parses a single R script or SQL script and turns the workflow
+    into a visual dependency map plus plain-language handoff materials.
+    The package can produce graph objects, self-contained HTML pages,
+    exportable diagrams, and written workflow summaries designed to help
+    technical and non-technical collaborators understand how inputs,
+    transformations, and outputs connect.
 URL: https://github.com/crg0195/ghostwriteR
 BugReports: https://github.com/crg0195/ghostwriteR/issues
 License: MIT + file LICENSE
 Encoding: UTF-8
 LazyData: true
 Roxygen: list(markdown = TRUE)
-RoxygenNote: 7.3.2
+RoxygenNote: 7.3.3
 Imports:
     DiagrammeR
 Suggests:
