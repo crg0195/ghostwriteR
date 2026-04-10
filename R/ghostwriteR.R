@@ -1126,10 +1126,10 @@ ghostwriter_parse_sql <- function(path) {
       return(metadata$node_id)
     }
 
-    ensure_source_step(name, group = group)
+    table_node(sql_clean_identifier(name), "source_table")
   }
 
-  process_query_stage <- function(stage, output_name = "", output_kind = "dataset", group = "") {
+  process_query_stage <- function(stage, output_name = "", output_kind = "dataset", group = "", final = FALSE) {
     current_ids <- character()
     current_source_label <- ""
     source_metadata <- list()
@@ -1141,6 +1141,39 @@ ghostwriter_parse_sql <- function(path) {
       resolved_inventory <- sql_resolve_query_inventory(stage, source_metadata)
       current_ids <- unique(vapply(stage$sources, function(source_name) source_node_id(source_name, group = group), character(1)))
       current_source_label <- paste(stage$sources, collapse = ", ")
+    }
+
+    if (isTRUE(final) || nzchar(output_name)) {
+      summary_title <- if (nzchar(output_name)) "Create working dataset" else "Run main query"
+      summary_detail <- sql_stage_summary_detail(stage, output_name = output_name, final = final)
+      summary_explanation <- if (nzchar(output_name)) {
+        paste(
+          "A working dataset is a temporary SQL result created inside the script.",
+          "SQL users often call this a CTE, or common table expression.",
+          "It is used later in the query but is not usually saved as a permanent table by itself."
+        )
+      } else {
+        paste(
+          "This is the final SELECT statement that returns the main result of the SQL script.",
+          "It can reuse earlier working datasets, also called CTEs, before producing the final rows shown or exported."
+        )
+      }
+      summary_step_id <- add_step_record(
+        kind = "transform",
+        title = summary_title,
+        detail = summary_detail,
+        source = current_source_label,
+        group = group,
+        input_columns = stage$query_input_columns %||% "",
+        output_columns = resolved_inventory$output_columns,
+        carried_columns = resolved_inventory$carried_columns,
+        created_columns = resolved_inventory$created_columns,
+        code = sql_stage_code(stage$name %||% "", stage$query %||% "", final = final),
+        explanation = summary_explanation
+      )
+      connect_many(current_ids, summary_step_id, "flows")
+      current_ids <- summary_step_id
+      current_source_label <- if (nzchar(output_name)) paste0("working dataset `", output_name, "`") else "the result from the previous step"
     }
 
     if (length(stage$query_steps) > 0L) {
@@ -1163,7 +1196,8 @@ ghostwriter_parse_sql <- function(path) {
           input_columns = step$input_columns %||% "",
           output_columns = if (nzchar(step_output)) resolved_inventory$output_columns else step$output_columns %||% "",
           carried_columns = if (nzchar(step_output)) resolved_inventory$carried_columns else step$carried_columns %||% "",
-          created_columns = if (nzchar(step_output)) resolved_inventory$created_columns else step$created_columns %||% ""
+          created_columns = if (nzchar(step_output)) resolved_inventory$created_columns else step$created_columns %||% "",
+          code = sql_stage_code(stage$name %||% "", stage$query %||% "", final = final)
         )
         connect_many(current_ids, step_id, "flows")
         current_ids <- step_id
@@ -1184,7 +1218,8 @@ ghostwriter_parse_sql <- function(path) {
           input_columns = stage$query_input_columns %||% "",
           output_columns = resolved_inventory$output_columns,
           carried_columns = resolved_inventory$carried_columns,
-          created_columns = resolved_inventory$created_columns
+          created_columns = resolved_inventory$created_columns,
+          code = sql_stage_code(stage$name %||% "", stage$query %||% "", final = final)
         )
         connect_many(current_ids, step_id, "flows")
         current_ids <- step_id
@@ -1222,7 +1257,8 @@ ghostwriter_parse_sql <- function(path) {
         input_columns = stage$query_input_columns %||% "",
         output_columns = resolved_inventory$output_columns,
         carried_columns = resolved_inventory$carried_columns,
-        created_columns = resolved_inventory$created_columns
+        created_columns = resolved_inventory$created_columns,
+        code = sql_stage_code(stage$name %||% "", stage$query %||% "", final = final)
       )
       connect_many(current_ids, step_id, "flows")
       current_ids <- step_id
@@ -1255,7 +1291,8 @@ ghostwriter_parse_sql <- function(path) {
           stage,
           output_name = stage$name,
           output_kind = "dataset",
-          group = stage_group
+          group = stage_group,
+          final = identical(stage_index, length(info$stages))
         )
         current_ids <- stage_result$node_ids
         current_source_label <- stage_result$source_label
@@ -4824,7 +4861,8 @@ sql_statement_list <- function(text) {
 
 sql_strip_comments <- function(text) {
   text <- gsub("(?s)/\\*.*?\\*/", " ", text, perl = TRUE)
-  gsub("(?m)--[^\\n]*$", " ", text, perl = TRUE)
+  text <- gsub("(?m)--[^\\n]*$", " ", text, perl = TRUE)
+  gsub("(?m)^\\s*-{3,}[^\\n]*$", " ", text, perl = TRUE)
 }
 
 sql_depth0_text <- function(text) {
@@ -4895,6 +4933,7 @@ sql_describe_statement <- function(statement) {
     stage_infos <- lapply(stages, function(stage) {
       parsed <- sql_describe_query(stage$query)
       parsed$name <- stage$name
+      parsed$query <- stage$query
       parsed
     })
     final_stage <- if (length(stage_infos) > 0L) stage_infos[[length(stage_infos)]] else list(sources = character(), query_steps = list(), query_detail = "")
@@ -5125,7 +5164,7 @@ sql_query_text <- function(statement) {
 }
 
 sql_query_stages <- function(query_text) {
-  query_text <- compact_ws(query_text)
+  query_text <- compact_ws(sql_strip_comments(query_text))
   if (!grepl("(?is)^with\\b", query_text, perl = TRUE)) {
     return(list(list(name = "", query = query_text)))
   }
@@ -5318,13 +5357,122 @@ sql_output_info <- function(statement) {
   list(title = "", detail = "", name = "", path = "", is_temporary = FALSE)
 }
 
+sql_stage_code <- function(name = "", query_text = "", final = FALSE) {
+  query_text <- trim_ws(query_text)
+  if (!nzchar(query_text)) {
+    return("")
+  }
+
+  pretty <- compact_ws(query_text)
+  pretty <- gsub("(?i)\\bselect\\b", "\nSELECT", pretty, perl = TRUE)
+  pretty <- gsub("(?i)\\bfrom\\b", "\nFROM", pretty, perl = TRUE)
+  pretty <- gsub("(?i)\\b(inner|left|right|full|cross)\\s+join\\b", "\n\\1 JOIN", pretty, perl = TRUE)
+  pretty <- gsub("(?i)\\bwhere\\b", "\nWHERE", pretty, perl = TRUE)
+  pretty <- gsub("(?i)\\bgroup\\s+by\\b", "\nGROUP BY", pretty, perl = TRUE)
+  pretty <- gsub("(?i)\\border\\s+by\\b", "\nORDER BY", pretty, perl = TRUE)
+  pretty <- gsub("(?i)\\bhaving\\b", "\nHAVING", pretty, perl = TRUE)
+  pretty <- gsub(',\\s+(?=[[:alnum:]_\\[\\]"])', ',\n  ', pretty, perl = TRUE)
+  pretty <- trim_ws(pretty)
+
+  if (nzchar(trim_ws(name))) {
+    return(paste0(sql_clean_identifier(name), " AS (\n  ", pretty, "\n)"))
+  }
+
+  pretty
+}
+
+sql_stage_field_summary <- function(select_items) {
+  if (length(select_items) == 0L) {
+    return("")
+  }
+
+  item_text <- trim_ws(select_items)
+  wildcard_items <- item_text[grepl("(^\\*$|\\.\\*$)", item_text, perl = TRUE)]
+  alias_items <- item_text[grepl("(?is)\\s+as\\s+", item_text, perl = TRUE)]
+
+  pieces <- character()
+  if (length(wildcard_items) > 0L) {
+    wildcard_bits <- vapply(utils::head(wildcard_items, 3L), function(item) {
+      if (identical(item, "*")) {
+        return("include all selected columns")
+      }
+      paste0("include all columns from `", sub("\\.\\*$", "", item, perl = TRUE), "`")
+    }, character(1))
+    pieces <- c(pieces, paste(wildcard_bits, collapse = "; "))
+  }
+
+  if (length(alias_items) > 0L) {
+    alias_bits <- vapply(utils::head(alias_items, 4L), sql_alias_summary, character(1))
+    alias_bits <- alias_bits[nzchar(alias_bits)]
+    if (length(alias_bits) > 0L) {
+      pieces <- c(pieces, paste0("rename selected fields such as ", paste(alias_bits, collapse = "; ")))
+    }
+  }
+
+  paste(pieces[nzchar(pieces)], collapse = "; ")
+}
+
+sql_alias_summary <- function(item) {
+  item <- trim_ws(item)
+  alias_match <- regexec("(?is)^(.+?)\\s+as\\s+(.+)$", item, perl = TRUE)
+  alias_hit <- regmatches(item, alias_match)[[1]]
+  if (length(alias_hit) < 3L) {
+    return("")
+  }
+
+  source_text <- trim_ws(alias_hit[[2]])
+  if (!sql_is_plain_column_reference(source_text)) {
+    return("")
+  }
+  alias_name <- sql_clean_identifier(alias_hit[[3]])
+  source_name <- sql_clean_identifier(sub("^.*\\.", "", source_text, perl = TRUE))
+  if (!nzchar(source_name)) {
+    source_name <- source_text
+  }
+  paste0("`", source_name, "` -> `", alias_name, "`")
+}
+
+sql_stage_summary_detail <- function(stage, output_name = "", final = FALSE) {
+  sources <- stage$sources %||% character()
+  select_items <- stage$select_items %||% character()
+  text <- stage$query %||% ""
+  pieces <- character()
+
+  if (nzchar(output_name)) {
+    pieces <- c(pieces, paste0("create a temporary SQL result named `", output_name, "`"))
+  } else if (isTRUE(final)) {
+    pieces <- c(pieces, "return the main query result")
+  }
+
+  if (length(sources) == 1L) {
+    pieces <- c(pieces, paste0("start from `", sources[[1]], "`"))
+  } else if (length(sources) > 1L) {
+    pieces <- c(pieces, paste0("combine data from ", paste(paste0("`", sources, "`"), collapse = ", ")))
+  }
+
+  field_summary <- sql_stage_field_summary(select_items)
+  if (nzchar(field_summary)) {
+    pieces <- c(pieces, field_summary)
+  }
+
+  if (grepl("(?i)\\bcase\\b", text, perl = TRUE)) {
+    pieces <- c(pieces, "apply CASE WHEN rules to create readable conditional fields")
+  }
+
+  if (grepl("(?is)\\bselect\\s+distinct\\b", text, perl = TRUE)) {
+    pieces <- c(pieces, "keep unique result rows with SELECT DISTINCT")
+  }
+
+  paste(pieces[nzchar(pieces)], collapse = "; ")
+}
+
 sql_stage_group_label <- function(name = "", final = FALSE) {
   if (nzchar(trim_ws(name))) {
-    return(paste0("Working table: ", sql_clean_identifier(name)))
+    return(paste0("Working dataset: ", sql_clean_identifier(name)))
   }
 
   if (isTRUE(final)) {
-    return("Final query")
+    return("Main query")
   }
 
   "SQL workflow"
