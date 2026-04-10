@@ -273,6 +273,8 @@ ghostwriter_parse_r <- function(path) {
     carried_columns = character(),
     created_columns = character(),
     superseded_by = character(),
+    code = character(),
+    explanation = character(),
     narrative = character(),
     stringsAsFactors = FALSE
   )
@@ -283,6 +285,7 @@ ghostwriter_parse_r <- function(path) {
   node_ids <- character()
   file_collections <- list()
   import_lists <- list()
+  current_code_chunk <- ""
 
   node_kind_rank <- function(kind) {
     switch(
@@ -342,9 +345,12 @@ ghostwriter_parse_r <- function(path) {
     )
   }
 
-  add_step_record <- function(kind, title, detail = "", source = "", output = "", target_path = "", group = "", input_columns = "", output_columns = "", carried_columns = "", created_columns = "", superseded_by = "") {
+  add_step_record <- function(kind, title, detail = "", source = "", output = "", target_path = "", group = "", input_columns = "", output_columns = "", carried_columns = "", created_columns = "", superseded_by = "", code = current_code_chunk, explanation = "") {
     step_index <<- step_index + 1L
     narrative <- build_step_narrative(kind, title, detail, source, output, target_path)
+    if (!nzchar(explanation)) {
+      explanation <- build_code_explanation(code, title, detail, language = "r")
+    }
 
     steps <<- rbind(
       steps,
@@ -362,6 +368,8 @@ ghostwriter_parse_r <- function(path) {
         carried_columns = carried_columns,
         created_columns = created_columns,
         superseded_by = superseded_by,
+        code = code,
+        explanation = explanation,
         narrative = narrative,
         stringsAsFactors = FALSE
       )
@@ -599,6 +607,7 @@ ghostwriter_parse_r <- function(path) {
   }
 
   for (index in seq_along(exprs)) {
+    current_code_chunk <- expression_code(exprs[[index]], srcrefs[[index]])
     statement <- expression_text(exprs[[index]], srcrefs[[index]])
     if (!nzchar(statement)) {
       next
@@ -926,6 +935,8 @@ ghostwriter_parse_sql <- function(path) {
     carried_columns = character(),
     created_columns = character(),
     superseded_by = character(),
+    code = character(),
+    explanation = character(),
     narrative = character(),
     stringsAsFactors = FALSE
   )
@@ -943,6 +954,7 @@ ghostwriter_parse_sql <- function(path) {
   result_output_columns <- character()
   result_carried_columns <- character()
   result_created_columns <- character()
+  current_sql_chunk <- ""
 
   add_node <- function(key, label, kind) {
     match_index <- match(key, node_keys)
@@ -986,9 +998,12 @@ ghostwriter_parse_sql <- function(path) {
     }
   }
 
-  add_step_record <- function(kind, title, detail = "", source = "", output = "", target_path = "", group = "", input_columns = "", output_columns = "", carried_columns = "", created_columns = "", superseded_by = "") {
+  add_step_record <- function(kind, title, detail = "", source = "", output = "", target_path = "", group = "", input_columns = "", output_columns = "", carried_columns = "", created_columns = "", superseded_by = "", code = current_sql_chunk, explanation = "") {
     step_index <<- step_index + 1L
     narrative <- build_step_narrative(kind, title, detail, source, output, target_path)
+    if (!nzchar(explanation)) {
+      explanation <- build_code_explanation(code, title, detail, language = "sql")
+    }
 
     steps <<- rbind(
       steps,
@@ -1006,6 +1021,8 @@ ghostwriter_parse_sql <- function(path) {
         carried_columns = carried_columns,
         created_columns = created_columns,
         superseded_by = superseded_by,
+        code = code,
+        explanation = explanation,
         narrative = narrative,
         stringsAsFactors = FALSE
       )
@@ -1221,6 +1238,7 @@ ghostwriter_parse_sql <- function(path) {
   }
 
   for (statement in statements) {
+    current_sql_chunk <- statement
     info <- sql_describe_statement(statement)
     current_ids <- character()
     current_source_label <- ""
@@ -1980,6 +1998,7 @@ build_html_page <- function(parsed, svg_text) {
   stats <- workflow_stats(parsed)
   steps <- parsed$steps
   script_name <- basename(parsed$script_path)
+  report_date <- sub(" 0", " ", format(Sys.Date(), "%B %d, %Y"), fixed = TRUE)
   subtitle <- workflow_summary_line(stats)
   has_inventories <- workflow_has_inventories(steps)
 
@@ -2019,8 +2038,9 @@ build_html_page <- function(parsed, svg_text) {
     '  <div class="page-shell">\n',
     '    <header class="hero-card">\n',
     '      <div class="hero-copy">\n',
-    '        <p class="eyebrow">GhostwriteR Workflow Bundle</p>\n',
+    '        <p class="script-kicker">The script titled:</p>\n',
     '        <h1>', html_escape(script_name), '</h1>\n',
+    '        <p class="hero-date">as of ', html_escape(report_date), '</p>\n',
     '        <p class="hero-summary">', html_escape(subtitle), '</p>\n',
     '      </div>\n',
     '      <div class="stat-grid">\n',
@@ -2658,6 +2678,8 @@ build_timeline_step_button <- function(step_row, active = FALSE, hidden = FALSE)
     '" data-carried-columns="', html_escape(step$carried_columns),
     '" data-created-columns="', html_escape(step$created_columns),
     '" data-superseded-by="', html_escape(step$superseded_by),
+    '" data-code="', html_escape(step$code),
+    '" data-explanation="', html_escape(step$explanation),
     '">',
     '<span class="timeline-step__number">', step$step, '</span>',
     '<span class="timeline-step__body">',
@@ -2706,6 +2728,11 @@ build_html_detail_panel <- function(steps) {
     '<h2 id="detailTitle">', html_escape(step$title), '</h2>',
     '<p class="detail-narrative" id="detailNarrative">', html_escape(step$narrative), '</p>',
     '<div class="detail-callout" id="detailCallout">', build_detail_callout_markup(step$detail), '</div>',
+    '<div class="detail-explanation" id="detailExplanationBlock">', build_detail_explanation_markup(step$explanation), '</div>',
+    '<details class="detail-code" id="detailCodeBlock">',
+    '<summary>Show code chunk</summary>',
+    '<pre><code id="detailCode">', html_escape(step$code), '</code></pre>',
+    '</details>',
     '<dl class="detail-meta">',
     build_detail_meta_row('Source', step$source, 'detailSource'),
     build_detail_meta_row('Output', step$output, 'detailOutput'),
@@ -2737,6 +2764,22 @@ build_detail_callout_markup <- function(detail) {
 
   items <- paste0('<li>', html_escape(parts), '</li>', collapse = "")
   paste0('<ol class="detail-list">', items, '</ol>')
+}
+
+build_detail_explanation_markup <- function(explanation) {
+  explanation <- trim_ws(explanation)
+  if (!nzchar(explanation)) {
+    return('<p class="detail-explanation__text">No explanation notes for this step.</p>')
+  }
+
+  parts <- trim_ws(unlist(strsplit(explanation, "\n", fixed = TRUE), use.names = FALSE))
+  parts <- parts[nzchar(parts)]
+  if (length(parts) <= 1L) {
+    return(paste0('<p class="detail-explanation__text">', html_escape(explanation), '</p>'))
+  }
+
+  items <- paste0('<li>', html_escape(parts), '</li>', collapse = "")
+  paste0('<ul class="detail-explanation__list">', items, '</ul>')
 }
 
 build_html_inventory_view <- function(steps, nodes = NULL) {
@@ -2899,6 +2942,17 @@ html_page_css <- function() {
     '  line-height: 1.05;',
     '}',
     '.hero-copy h1 { font-size: clamp(2rem, 4vw, 3.35rem); }',
+    '.script-kicker {',
+    '  margin: 0 0 8px;',
+    '  color: var(--muted);',
+    '  font-size: 1rem;',
+    '  line-height: 1.5;',
+    '}',
+    '.hero-date {',
+    '  margin: 10px 0 0;',
+    '  color: var(--muted);',
+    '  font-weight: 700;',
+    '}',
     '.hero-summary {',
     '  margin: 16px 0 0;',
     '  max-width: 52rem;',
@@ -3165,6 +3219,57 @@ html_page_css <- function() {
     '.detail-list li {',
     '  padding-left: 0.1rem;',
     '}',
+    '.detail-explanation {',
+    '  padding: 14px 16px;',
+    '  border-radius: 18px;',
+    '  background: rgba(35, 75, 104, 0.07);',
+    '  border: 1px solid rgba(35, 75, 104, 0.12);',
+    '  line-height: 1.65;',
+    '}',
+    '.detail-explanation::before {',
+    '  content: "Explanation";',
+    '  display: block;',
+    '  margin-bottom: 6px;',
+    '  color: var(--muted);',
+    '  font-size: 0.72rem;',
+    '  text-transform: uppercase;',
+    '  letter-spacing: 0.12em;',
+    '  font-weight: 700;',
+    '}',
+    '.detail-explanation__text, .detail-explanation__list {',
+    '  margin: 0;',
+    '}',
+    '.detail-explanation__list {',
+    '  padding-left: 1.1rem;',
+    '  display: grid;',
+    '  gap: 0.35rem;',
+    '}',
+    '.detail-code {',
+    '  border-radius: 18px;',
+    '  border: 1px solid rgba(24, 33, 44, 0.10);',
+    '  background: rgba(255,255,255,0.72);',
+    '  overflow: hidden;',
+    '}',
+    '.detail-code summary {',
+    '  cursor: pointer;',
+    '  padding: 12px 14px;',
+    '  font-weight: 700;',
+    '  color: #1f425c;',
+    '}',
+    '.detail-code pre {',
+    '  margin: 0;',
+    '  padding: 14px;',
+    '  overflow: auto;',
+    '  background: #18212c;',
+    '  color: #f8f0dc;',
+    '  font-size: 0.82rem;',
+    '  line-height: 1.5;',
+    '}',
+    '.detail-code code {',
+    '  font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;',
+    '  white-space: pre;',
+    '}',
+    '.detail-code.is-empty { display: none; }',
     '.detail-meta {',
     '  margin: 0;',
     '  display: grid;',
@@ -3356,6 +3461,9 @@ html_page_js <- function() {
     '    title: document.getElementById("detailTitle"),',
     '    narrative: document.getElementById("detailNarrative"),',
     '    callout: document.getElementById("detailCallout"),',
+    '    explanationBlock: document.getElementById("detailExplanationBlock"),',
+    '    codeBlock: document.getElementById("detailCodeBlock"),',
+    '    code: document.getElementById("detailCode"),',
     '    sourceRow: document.getElementById("detailSourceRow"),',
     '    source: document.getElementById("detailSource"),',
     '    outputRow: document.getElementById("detailOutputRow"),',
@@ -3413,6 +3521,25 @@ html_page_js <- function() {
     '      return "<li>" + escapeHtml(part) + "</li>";',
     '    }).join("") + "</ol>";',
     '  }',
+    '  function renderDetailExplanation(explanation) {',
+    '    var text = (explanation || "").trim();',
+    '    if (!text) {',
+    '      return "<p class=\\\"detail-explanation__text\\\">No explanation notes for this step.</p>";',
+    '    }',
+    '    var parts = text.split(/\\n+/).map(function(part) { return part.trim(); }).filter(Boolean);',
+    '    if (parts.length <= 1) {',
+    '      return "<p class=\\\"detail-explanation__text\\\">" + escapeHtml(text) + "</p>";',
+    '    }',
+    '    return "<ul class=\\\"detail-explanation__list\\\">" + parts.map(function(part) {',
+    '      return "<li>" + escapeHtml(part) + "</li>";',
+    '    }).join("") + "</ul>";',
+    '  }',
+    '  function setCodeChunk(code) {',
+    '    var text = (code || "").trim();',
+    '    if (!detailMap.codeBlock || !detailMap.code) return;',
+    '    detailMap.codeBlock.classList.toggle("is-empty", !text);',
+    '    detailMap.code.textContent = text;',
+    '  }',
     '  function activateStep(button) {',
     '    stepButtons.forEach(function(node) { node.classList.remove("is-active"); });',
     '    button.classList.add("is-active");',
@@ -3421,6 +3548,8 @@ html_page_js <- function() {
     '    detailMap.title.textContent = button.dataset.title || "";',
     '    detailMap.narrative.textContent = button.dataset.narrative || "";',
     '    detailMap.callout.innerHTML = renderDetailCallout(button.dataset.detail || "");',
+    '    if (detailMap.explanationBlock) detailMap.explanationBlock.innerHTML = renderDetailExplanation(button.dataset.explanation || "");',
+    '    setCodeChunk(button.dataset.code || "");',
     '    setMeta(detailMap.sourceRow, detailMap.source, button.dataset.source || "");',
     '    setMeta(detailMap.outputRow, detailMap.output, button.dataset.output || "");',
     '    setMeta(detailMap.targetRow, detailMap.target, button.dataset.target || "");',
@@ -3621,6 +3750,104 @@ docx_paragraph <- function(text, style = "Normal") {
     '<w:r><w:t xml:space="preserve">', escape_xml(text), '</w:t></w:r>',
     '</w:p>'
   )
+}
+
+build_code_explanation <- function(code, title = "", detail = "", language = c("r", "sql")) {
+  language <- match.arg(language)
+  code <- trim_ws(code)
+  if (!nzchar(code)) {
+    return("")
+  }
+
+  if (identical(language, "sql")) {
+    return(sql_code_explanation(code, title, detail))
+  }
+
+  r_code_explanation(code, title, detail)
+}
+
+r_code_explanation <- function(code, title = "", detail = "") {
+  functions <- unique(plain_fn(unlist(regmatches(code, gregexpr("[[:alnum:]_.]+(?:::[[:alnum:]_.]+)?\\s*(?=\\()", code, perl = TRUE)), use.names = FALSE)))
+  functions <- functions[nzchar(functions)]
+  if (length(functions) == 0L) {
+    return("")
+  }
+
+  notes <- vapply(functions, r_function_note, character(1), USE.NAMES = FALSE)
+  notes <- unique(notes[nzchar(notes)])
+
+  if (grepl("case_when\\s*\\(", code, perl = TRUE) && grepl("DJF|MAM|JJA|SON", code, perl = TRUE)) {
+    notes <- c(notes, "This step recodes compact season codes: DJF = Winter, MAM = Spring, JJA = Summer, and SON = Fall.")
+  }
+
+  paste(unique(notes), collapse = "\n")
+}
+
+r_function_note <- function(fn) {
+  switch(
+    fn,
+    dir = "dir() searches a folder and returns file names or file paths that match the requested pattern.",
+    list.files = "list.files() searches a folder and returns file names or file paths that match the requested pattern.",
+    fromJSON = "fromJSON() reads a JSON file and converts it into R data; flatten = TRUE spreads nested JSON fields into regular columns where possible.",
+    vector = "vector() creates an empty container; here it is used to prepare a list that will hold imported files.",
+    bind_rows = "bind_rows() stacks many imported tables into one combined data frame.",
+    c = "c() combines values into a vector, often used as a reusable list of labels or filter values.",
+    filter = "filter() keeps only rows where the stated condition is true.",
+    mutate = "mutate() adds new columns or changes existing columns.",
+    mutate_at = "mutate_at() applies the same conversion or transformation to selected columns.",
+    case_when = "case_when() is a multi-condition recode: it checks conditions in order and returns the matching label/value.",
+    season = "season() converts date values into season labels. In this workflow, those labels are used to group listening history by time of year.",
+    ymd_hms = "ymd_hms() parses text timestamps into date-time values ordered as year-month-day hour-minute-second.",
+    hours = "hours() creates a time offset in hours; subtracting it shifts timestamps to a different time zone or reference time.",
+    floor_date = "floor_date() rounds dates down to the start of a period, such as the day or month.",
+    as_date = "as_date() converts a date-time value into a date without the time-of-day portion.",
+    group_by = "group_by() defines the groups for later summaries, similar to choosing rows/columns in a pivot table.",
+    summarise = "summarise() collapses each group into summary metrics, such as totals, averages, or counts.",
+    summarize = "summarize() collapses each group into summary metrics, such as totals, averages, or counts.",
+    arrange = "arrange() sorts the rows by one or more columns.",
+    desc = "desc() means sort descending, with the largest values first.",
+    count = "count() counts how many records fall into each group.",
+    slice_head = "slice_head() keeps the first rows after any grouping or sorting has been applied.",
+    e_common = "e_common() sets default echarts4r styling options that later interactive charts inherit.",
+    e_charts = "e_charts() starts an interactive echarts4r chart and chooses the main category axis.",
+    e_bar = "e_bar() adds a bar series to an interactive chart.",
+    e_line = "e_line() adds a line series to an interactive chart.",
+    e_title = "e_title() sets the chart title and optional subtitle.",
+    e_legend = "e_legend() controls whether and where the chart legend appears.",
+    e_color = "e_color() sets chart colors and background styling.",
+    e_tooltip = "e_tooltip() controls the hover tooltip shown in the interactive chart.",
+    e_arrange = "e_arrange() places multiple echarts4r charts into one combined display.",
+    ggplot = "ggplot() starts a ggplot chart by choosing the data and visual mappings.",
+    aes = "aes() maps data columns to visual roles such as x-axis, y-axis, color, or grouping.",
+    labs = "labs() sets human-readable chart titles, subtitles, axis labels, or legend labels.",
+    lm = "lm() fits a linear model that estimates one outcome from one or more predictors.",
+    glm = "glm() fits a generalized linear model for outcomes that need non-normal assumptions, such as binary or count outcomes.",
+    predict = "predict() applies a fitted model to data to generate predicted values.",
+    ""
+  )
+}
+
+sql_code_explanation <- function(code, title = "", detail = "") {
+  notes <- character()
+  lowered <- tolower(code)
+  if (grepl("\\bleft\\s+join\\b", lowered, perl = TRUE)) {
+    notes <- c(notes, "LEFT JOIN keeps every row from the left/current table even when the joined table has no match.")
+  }
+  if (grepl("\\bgroup\\s+by\\b", lowered, perl = TRUE)) {
+    notes <- c(notes, "GROUP BY defines the slices used for summary metrics, similar to grouping fields in a pivot table.")
+  }
+  if (grepl("\\bhaving\\b|\\bqualify\\b", lowered, perl = TRUE)) {
+    notes <- c(notes, "This filter is applied after summary/window calculations, not directly to raw source rows.")
+  }
+  paste(unique(notes), collapse = "\n")
+}
+
+expression_code <- function(expr, srcref) {
+  if (!is.null(srcref)) {
+    return(paste(as.character(srcref), collapse = "\n"))
+  }
+
+  paste(deparse(expr), collapse = "\n")
 }
 
 expression_text <- function(expr, srcref) {
@@ -4166,6 +4393,10 @@ humanize_special_call <- function(text) {
 
   if (fn == "format" && length(args) >= 2) {
     return(paste0("format ", humanize_expression(args[[1]]), " as ", strip_wrapping_quotes(args[[2]])))
+  }
+
+  if (fn == "season" && length(args) >= 1) {
+    return(paste0("convert ", humanize_expression(args[[1]]), " into a season label"))
   }
 
   if (fn == "predict") {
