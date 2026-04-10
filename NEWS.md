@@ -1,5 +1,13 @@
 # ghostwriteR news
 
+## ghostwriteR 0.0.5
+
+- Added richer HTML step detail panes with an Explanation section and collapsible code chunks.
+- Hardened HTML detail rendering by replacing dynamic innerHTML updates with DOM construction and textContent.
+- Improved R workflow parsing for JSON ingestion, legacy pipes, chart pipelines, and common data science verbs.
+- Improved SQL workflow parsing for grouped filters, joins, unions, inventories, and common dialect patterns.
+- Updated the HTML report header to show the script title and generation date.
+
 ## ghostwriteR 0.0.3
 
 - Aligned package version metadata with the latest GitHub release tag.
