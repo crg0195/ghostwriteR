@@ -26,7 +26,8 @@ test_that("ghostwriteR parses SQL source tables, transformations, and output tab
   expect_true(any(nodes$kind == "output_table" & grepl("analytics.monthly_sales", nodes$label, fixed = TRUE)))
   expect_true(any(nodes$kind == "output_file" & grepl("monthly_sales.csv", nodes$label, fixed = TRUE)))
 
-  expect_true(any(steps$title == "Use source table"))
+  expect_false(any(steps$title == "Use source table"))
+  expect_true(any(steps$title == "Run main query"))
   expect_true(any(steps$title == "Join tables"))
   expect_true(any(steps$title == "Filter rows"))
   expect_true(any(steps$title == "Summarize data"))
@@ -34,7 +35,7 @@ test_that("ghostwriteR parses SQL source tables, transformations, and output tab
   expect_true(any(steps$title == "Export query results"))
   expect_true(any(grepl("INNER JOIN", steps$detail, fixed = TRUE)))
 
-  expect_true(any(edges$type == "reads"))
+  expect_false(any(edges$type == "reads"))
   expect_true(any(edges$type == "flows"))
   expect_true(any(edges$type == "creates"))
   expect_true(any(edges$type == "writes"))
@@ -201,9 +202,9 @@ test_that("ghostwriteR handles CTE-heavy SQL with date filters in html export", 
   expect_match(html, "inventoryNamedInput", fixed = TRUE)
   expect_match(html, "inventoryStepInput", fixed = TRUE)
   expect_match(html, "1 in", fixed = TRUE)
-  expect_lt(regexpr("Working table: filtered_sales", html, fixed = TRUE)[[1]], regexpr("Working table: regional_summary", html, fixed = TRUE)[[1]])
-  expect_lt(regexpr("Working table: regional_summary", html, fixed = TRUE)[[1]], regexpr("Final query", html, fixed = TRUE)[[1]])
-  expect_lt(regexpr("Final query", html, fixed = TRUE)[[1]], regexpr("Export", html, fixed = TRUE)[[1]])
+  expect_lt(regexpr("Working dataset: filtered_sales", html, fixed = TRUE)[[1]], regexpr("Working dataset: regional_summary", html, fixed = TRUE)[[1]])
+  expect_lt(regexpr("Working dataset: regional_summary", html, fixed = TRUE)[[1]], regexpr("Main query", html, fixed = TRUE)[[1]])
+  expect_lt(regexpr("Main query", html, fixed = TRUE)[[1]], regexpr("Export", html, fixed = TRUE)[[1]])
 })
 
 test_that("sql inventories capture columns used and produced for major steps", {
@@ -319,7 +320,7 @@ test_that("sql named-table inventories keep pass-through and created columns sep
   expect_match(report, "Newly created or changed:", fixed = TRUE)
 })
 
-test_that("sql source steps are deduplicated when the same raw table is reused", {
+test_that("sql source nodes are deduplicated when the same raw table is reused", {
   tmp <- tempfile(fileext = ".sql")
   writeLines(c(
     "WITH first_pass AS (",
@@ -334,9 +335,10 @@ test_that("sql source steps are deduplicated when the same raw table is reused",
   ), tmp)
 
   parsed <- ghostwriteR:::ghostwriter_parse(tmp)
-  source_steps <- parsed$steps[parsed$steps$title == "Use source table" & parsed$steps$detail == "raw.sales", , drop = FALSE]
+  source_nodes <- parsed$nodes[parsed$nodes$kind == "source_table" & grepl("raw.sales", parsed$nodes$label, fixed = TRUE), , drop = FALSE]
 
-  expect_equal(nrow(source_steps), 1L)
+  expect_equal(nrow(source_nodes), 1L)
+  expect_false(any(parsed$steps$title == "Use source table"))
 })
 
 test_that("sql clause extraction tolerates flexible whitespace", {
@@ -360,7 +362,7 @@ test_that("filter grouped results is classified as aggregation in the timeline",
   step_row <- data.frame(
     step = 1L,
     kind = "transform",
-    group = "Final query",
+    group = "Main query",
     title = "Filter grouped results",
     detail = "keep only region groups where total_revenue is at least 1000",
     source = "regional_summary",
@@ -389,3 +391,41 @@ test_that("sql source column map tolerates unmatched source refs", {
   expect_equal(map$known_table, c("id", "amount"))
 })
 
+
+
+test_that("sql cte workflow summaries and code chunks are scoped to each stage", {
+  tmp <- tempfile(fileext = ".sql")
+  writeLines(c(
+    "WITH agm AS (",
+    "  SELECT agmTable.[oid] AS \"agmOid\", agmCAM.*, rsc.[ID] AS \"Agreement ID\", rsc.[name] AS \"Agreement Name\"",
+    "  FROM [__ClickAgreement] agmTable",
+    "  INNER JOIN [__ClickAgreementCAM] agmCAM ON agmTable.[oid] = agmCAM.[AgreementOid]",
+    "  LEFT JOIN [__ClickRSC] rsc ON agmTable.[oid] = rsc.[AgreementOid]",
+    ")",
+    "--------- MAIN QUERY ---------",
+    "SELECT DISTINCT agm.[Agreement ID],",
+    "       CASE WHEN agm.[Agreement Name] IS NULL THEN \"Unknown\" ELSE agm.[Agreement Name] END AS agreement_name",
+    "FROM agm",
+    "ORDER BY agm.[Agreement ID];"
+  ), tmp)
+
+  parsed <- ghostwriteR:::ghostwriter_parse(tmp)
+  steps <- parsed$steps
+
+  expect_false(any(steps$title == "Use source table"))
+
+  cte_step <- steps[steps$group == "Working dataset: agm" & steps$title == "Create working dataset", , drop = FALSE]
+  expect_equal(nrow(cte_step), 1L)
+  expect_match(cte_step$detail[[1]], "temporary SQL result named `agm`", fixed = TRUE)
+  expect_match(cte_step$detail[[1]], "__ClickAgreement", fixed = TRUE)
+  expect_match(cte_step$detail[[1]], "include all columns from `agmCAM`", fixed = TRUE)
+  expect_match(cte_step$code[[1]], "agm AS (", fixed = TRUE)
+  expect_false(grepl("SELECT DISTINCT", cte_step$code[[1]], fixed = TRUE))
+
+  main_step <- steps[steps$group == "Main query" & steps$title == "Run main query", , drop = FALSE]
+  expect_equal(nrow(main_step), 1L)
+  expect_match(main_step$detail[[1]], "apply CASE WHEN rules", fixed = TRUE)
+  expect_match(main_step$detail[[1]], "SELECT DISTINCT", fixed = TRUE)
+  expect_match(main_step$code[[1]], "SELECT DISTINCT", fixed = TRUE)
+  expect_false(grepl("agm AS (", main_step$code[[1]], fixed = TRUE))
+})
