@@ -42,9 +42,9 @@ test_that("R parser handles realistic workflow details for handoff users", {
   steps <- parsed$steps
   stats <- ghostwriteR:::workflow_stats(parsed)
 
-  filter_step <- steps[steps$title == "Filter rows", , drop = FALSE]
-  expect_true(any(grepl("customer_id is present", filter_step$detail, fixed = TRUE)))
-  expect_false(any(grepl("!customer_id is missing", filter_step$detail, fixed = TRUE)))
+  prep_step <- steps[steps$title == "Prepare data frame", , drop = FALSE]
+  expect_true(any(grepl("customer_id is present", prep_step$detail, fixed = TRUE)))
+  expect_false(any(grepl("!customer_id is missing", prep_step$detail, fixed = TRUE)))
 
   model_step <- steps[steps$title == "Fit linear model", , drop = FALSE]
   expect_true(any(model_step$source == "sales_enriched"))
@@ -123,6 +123,7 @@ test_that("basename path style reduces full file paths in parsed output", {
 
   parsed <- ghostwriteR:::ghostwriter_parse(tmp)
   steps <- parsed$steps
+  stats <- ghostwriteR:::workflow_stats(parsed)
 
   expect_true(any(steps$target_path == "sales.csv"))
   expect_true(any(steps$target_path == "final.csv"))
@@ -137,4 +138,141 @@ test_that("unnamed callable transforms do not crash parsing", {
   ), tmp)
 
   expect_no_error(ghostwriteR:::ghostwriter_parse(tmp))
+})
+
+test_that("R parser recognizes discovered JSON files and list-based imports", {
+  tmp <- tempfile(fileext = ".R")
+  writeLines(c(
+    'files <- dir("data/spotify", pattern = "\\\\.json", full.names = TRUE)',
+    'df_list <- vector("list", length(files))',
+    'for (i in seq_along(files)) {',
+    '  df_list[[i]] <- fromJSON(files[[i]], flatten = TRUE)',
+    '}',
+    'streamingData1 <- bind_rows(df_list)'
+  ), tmp)
+
+  parsed <- ghostwriteR:::ghostwriter_parse(tmp)
+  steps <- parsed$steps
+  stats <- ghostwriteR:::workflow_stats(parsed)
+
+  discover_step <- steps[steps$title == "Discover source data files", , drop = FALSE]
+  import_step <- steps[steps$title == "Load JSON files", , drop = FALSE]
+  combine_step <- steps[steps$title == "Combine imported files", , drop = FALSE]
+
+  expect_equal(nrow(discover_step), 1)
+  expect_equal(nrow(import_step), 1)
+  expect_equal(nrow(combine_step), 1)
+  expect_true(discover_step$step[[1]] < import_step$step[[1]])
+  expect_true(import_step$step[[1]] < combine_step$step[[1]])
+  expect_match(discover_step$detail[[1]], "JSON files", fixed = TRUE)
+  expect_match(import_step$detail[[1]], "read the JSON files listed in `files`", fixed = TRUE)
+  expect_equal(import_step$output[[1]], "df_list")
+  expect_equal(combine_step$source[[1]], "df_list")
+  expect_equal(combine_step$output[[1]], "streamingData1")
+  expect_equal(stats$inputs, 1)
+})
+
+test_that("R parser handles magrittr pipes and older tidyverse verbs cleanly", {
+  tmp <- tempfile(fileext = ".R")
+  writeLines(c(
+    'library(jsonlite)',
+    'files <- dir("data/spotify", pattern = "\\\\.json", full.names = TRUE)',
+    'df_list <- vector("list", length(files))',
+    'for (i in seq_along(files)) {',
+    '  df_list[[i]] <- fromJSON(files[[i]], flatten = TRUE)',
+    '}',
+    'streamingData1 <- bind_rows(df_list)',
+    'streamingData1 %<>% filter(!artist %in% blocked_artists)',
+    'streamingData <- streamingData1 %>% as_tibble() %>% mutate_at("ts", ymd_hms) %>% mutate(date = floor_date(ts, "day") %>% as_date)'
+  ), tmp)
+
+  parsed <- ghostwriteR:::ghostwriter_parse(tmp)
+  steps <- parsed$steps
+
+  expect_true(any(steps$title == "Filter rows" & steps$output == "streamingData1"))
+  expect_true(any(steps$title == "Prepare data frame"))
+  expect_true(any(steps$title == "Prepare data frame" & grepl("update ts using ymd_hms", steps$detail, fixed = TRUE)))
+  expect_true(any(steps$title == "Prepare data frame" & grepl('date = floor_date\\(ts, "day"\\) then as_date', steps$detail)))
+  expect_true(any(grepl("artist is not in blocked_artists", steps$detail, fixed = TRUE)))
+})
+
+test_that("R parser ignores commented-out pipe fragments and captures standalone workflow calls", {
+  tmp <- tempfile(fileext = ".R")
+  writeLines(c(
+    'library(echarts4r)',
+    'season <- data.frame(season = c("Winter", "Spring"), minutes = c(10, 20), songs = c(1, 2))',
+    'e_common(font_family = "Sans", theme = NULL)',
+    'songs <- season %>% filter(minutes >= 10) %>%',
+    '  group_by(season) %>%',
+    '  # group_by(date = floor_date(date, "month")) %>%',
+    '  summarise(songs = n()) %>%',
+    '  arrange(desc(songs)) %>%',
+    '  e_charts(season) |>',
+    '  e_bar(songs, name = "Songs") |>',
+    '  # e_step(minutes, name = "Broken|>") |>',
+    '  e_title("Total Song Listening per Season", subtext = "From 2014-2023")',
+    'songs',
+    'mins <- season %>% count(season, sort = TRUE)',
+    'e_arrange(mins, songs)',
+    'season %>% count(minutes, sort = TRUE)',
+    'season %>% count(songs, sort = TRUE)'
+  ), tmp)
+
+  parsed <- ghostwriteR:::ghostwriter_parse(tmp)
+  steps <- parsed$steps
+
+  expect_false(any(grepl("Broken", steps$detail, fixed = TRUE)))
+  expect_false(any(grepl("floor_date\\(date, \"month\"\\)", steps$detail)))
+  expect_true(any(steps$title == "Set chart defaults"))
+  expect_true(any(steps$title == "Arrange charts"))
+  expect_true(any(steps$title == "Inspect intermediate results"))
+  expect_true(any(steps$title == "Display object" & steps$source == "songs"))
+})
+
+test_that("R parser marks overwritten objects as replaced later", {
+  tmp <- tempfile(fileext = ".R")
+  writeLines(c(
+    'season <- streamingData %>% mutate(season = season(date))',
+    'season <- streamingData %>% mutate(season = case_when(season(date) == "DJF" ~ "Winter", .default = "UNK"))',
+    'season_counts <- season %>% count(master_metadata_album_artist_name, sort = TRUE)',
+    'season_counts <- season %>% group_by(master_metadata_album_artist_name) %>% summarise(sum = sum(minutes))'
+  ), tmp)
+
+  parsed <- ghostwriteR:::ghostwriter_parse(tmp)
+  steps <- parsed$steps
+
+  season_steps <- steps[steps$output == "season", , drop = FALSE]
+  counts_steps <- steps[steps$output == "season_counts", , drop = FALSE]
+
+  expect_equal(nrow(season_steps), 2)
+  expect_equal(nrow(counts_steps), 2)
+  expect_true(nzchar(season_steps$superseded_by[[1]]))
+  expect_equal(season_steps$superseded_by[[1]], as.character(season_steps$step[[2]]))
+  expect_true(grepl("replaced later at step", season_steps$detail[[1]], fixed = TRUE))
+  expect_true(nzchar(counts_steps$superseded_by[[1]]))
+  expect_equal(counts_steps$superseded_by[[1]], as.character(counts_steps$step[[2]]))
+})
+
+test_that("R parser collapses chart-building pipelines and exploratory pipes", {
+  tmp <- tempfile(fileext = ".R")
+  writeLines(c(
+    'mins <- season %>% filter(ms_played >= 1000) %>% group_by(season) %>% summarise(totals = sum(minutes)) %>% arrange(desc(totals)) %>% e_charts(season) %>% e_bar(totals, name = "Total Minutes") %>% e_title("Total Minutes Listened", subtext = "Cumulative 2014-2023")',
+    'season %>% filter(ms_played >= 1000) %>% group_by(season) %>% summarise(totals = sum(minutes)) %>% arrange(desc(totals))',
+    'season(streamingData$date, lang = "en")',
+    'streamingData <- streamingData1 %>% as_tibble() %>% mutate_at("ts", ymd_hms) %>% mutate(date = floor_date(ts, "day") %>% as_date)'
+  ), tmp)
+
+  parsed <- ghostwriteR:::ghostwriter_parse(tmp)
+  steps <- parsed$steps
+  stats <- ghostwriteR:::workflow_stats(parsed)
+
+  chart_steps <- steps[steps$output == "mins", , drop = FALSE]
+  expect_true(any(chart_steps$title == "Create chart"))
+  expect_false(any(chart_steps$title %in% c("Add chart layer", "Label chart", "Style chart")))
+
+  inspect_steps <- steps[steps$kind == "analysis", , drop = FALSE]
+  expect_true(any(inspect_steps$title == "Inspect intermediate results"))
+  expect_true(any(inspect_steps$title == "Inspect season labels"))
+  expect_true(any(steps$title == "Prepare data frame" & steps$output == "streamingData"))
+  expect_true(stats$transforms < nrow(steps))
 })

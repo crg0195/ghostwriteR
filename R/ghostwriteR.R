@@ -207,7 +207,7 @@ ghostwriter_detect_language <- function(path) {
   }
 
   first_line <- tolower(trim_ws(preview_lines[[1]]))
-  if (grepl("^(with|select|create|insert|copy|unload)\\b", first_line, perl = TRUE)) {
+  if (grepl("^(with|select|create|insert|copy|unload|delete|update|merge|truncate|drop|alter|begin|declare|execute|call)\\b", first_line, perl = TRUE)) {
     return("sql")
   }
 
@@ -223,9 +223,15 @@ ghostwriter_parse_r <- function(path) {
   srcrefs <- attr(exprs, "srcref")
 
   input_funs <- c(
-    "read.csv", "readRDS", "readr::read_csv", "readr::read_tsv",
-    "readr::read_delim", "readxl::read_excel", "data.table::fread",
-    "DBI::dbGetQuery"
+    "read.csv", "read.csv2", "readRDS", "readr::read_csv", "readr::read_tsv",
+    "readr::read_delim", "readr::read_fwf", "readxl::read_excel",
+    "openxlsx::read.xlsx", "openxlsx2::read_xlsx",
+    "data.table::fread", "DBI::dbGetQuery", "DBI::dbReadTable",
+    "jsonlite::fromJSON", "fromJSON",
+    "haven::read_sas", "haven::read_spss", "haven::read_sav",
+    "haven::read_dta", "haven::read_stata",
+    "arrow::read_parquet", "arrow::read_feather", "arrow::read_csv_arrow",
+    "vroom::vroom"
   )
 
   output_funs <- c(
@@ -266,6 +272,7 @@ ghostwriter_parse_r <- function(path) {
     output_columns = character(),
     carried_columns = character(),
     created_columns = character(),
+    superseded_by = character(),
     narrative = character(),
     stringsAsFactors = FALSE
   )
@@ -274,6 +281,8 @@ ghostwriter_parse_r <- function(path) {
   step_index <- 0L
   node_keys <- character()
   node_ids <- character()
+  file_collections <- list()
+  import_lists <- list()
 
   node_kind_rank <- function(kind) {
     switch(
@@ -292,6 +301,7 @@ ghostwriter_parse_r <- function(path) {
       output_table = 3L,
       input_step = 4L,
       transform_step = 4L,
+      analysis_step = 4L,
       output_step = 4L,
       0L
     )
@@ -332,7 +342,7 @@ ghostwriter_parse_r <- function(path) {
     )
   }
 
-  add_step_record <- function(kind, title, detail = "", source = "", output = "", target_path = "", group = "", input_columns = "", output_columns = "", carried_columns = "", created_columns = "") {
+  add_step_record <- function(kind, title, detail = "", source = "", output = "", target_path = "", group = "", input_columns = "", output_columns = "", carried_columns = "", created_columns = "", superseded_by = "") {
     step_index <<- step_index + 1L
     narrative <- build_step_narrative(kind, title, detail, source, output, target_path)
 
@@ -351,6 +361,7 @@ ghostwriter_parse_r <- function(path) {
         output_columns = output_columns,
         carried_columns = carried_columns,
         created_columns = created_columns,
+        superseded_by = superseded_by,
         narrative = narrative,
         stringsAsFactors = FALSE
       )
@@ -424,22 +435,232 @@ ghostwriter_parse_r <- function(path) {
     list(node_id = NULL, source_label = "")
   }
 
+  file_collection_label <- function(pattern) {
+    pattern <- strip_wrapping_quotes(pattern %||% "")
+    pattern_lower <- tolower(pattern)
+
+    if (!nzchar(pattern_lower)) {
+      return("source data files")
+    }
+
+    if (grepl("json", pattern_lower, fixed = TRUE)) {
+      return("JSON files")
+    }
+
+    if (grepl("csv", pattern_lower, fixed = TRUE)) {
+      return("CSV files")
+    }
+
+    if (grepl("xlsx", pattern_lower, fixed = TRUE) || grepl("xls", pattern_lower, fixed = TRUE)) {
+      return("Excel files")
+    }
+
+    paste0("files matching ", pattern)
+  }
+
+  describe_file_discovery <- function(text) {
+    fn <- plain_fn(leading_call(text))
+    if (!fn %in% c("dir", "list.files")) {
+      return(NULL)
+    }
+
+    args <- call_args(text)
+    unnamed_args <- args[!grepl("^[[:alnum:]_.]+\\s*=", args)]
+    path_arg <- named_arg_value(args, "path")
+    if (!nzchar(path_arg) && length(unnamed_args) > 0L) {
+      path_arg <- unnamed_args[[1]]
+    }
+
+    pattern_arg <- named_arg_value(args, "pattern")
+    path_value <- display_path_value(extract_string_literal(path_arg))
+    path_label <- if (!is.null(path_value) && nzchar(path_value)) paste0("scan ", path_value) else "scan the selected folder"
+    detail <- paste0(path_label, " for ", file_collection_label(pattern_arg))
+
+    if (identical(tolower(strip_wrapping_quotes(named_arg_value(args, "full.names"))), "true")) {
+      detail <- paste0(detail, " and keep the full file paths")
+    }
+
+    list(
+      title = "Discover source data files",
+      detail = detail,
+      path = path_value %||% "",
+      pattern = strip_wrapping_quotes(pattern_arg),
+      object_kind = "vector_object"
+    )
+  }
+
+  describe_import_loop <- function(text) {
+    text <- compact_ws(text)
+    if (!grepl("^for\\s*\\(", text, perl = TRUE)) {
+      return(NULL)
+    }
+
+    loop_match <- regexec("^for\\s*\\(\\s*([[:alnum:]_.]+)\\s+in\\s+seq_along\\(([^)]+)\\)\\s*\\)\\s*\\{\\s*(.+)\\s*\\}$", text, perl = TRUE)
+    loop_hit <- regmatches(text, loop_match)[[1]]
+
+    if (length(loop_hit) < 4L) {
+      loop_match <- regexec("^for\\s*\\(\\s*([[:alnum:]_.]+)\\s+in\\s+([[:alnum:]_.]+)\\s*\\)\\s*\\{\\s*(.+)\\s*\\}$", text, perl = TRUE)
+      loop_hit <- regmatches(text, loop_match)[[1]]
+      if (length(loop_hit) < 4L) {
+        return(NULL)
+      }
+    }
+
+    index_name <- trim_ws(loop_hit[[2]])
+    source_collection <- trim_ws(loop_hit[[3]])
+    body <- trim_ws(loop_hit[[4]])
+
+    body_match <- regexec("^([[:alnum:]_.]+)\\s*\\[\\[[^]]+\\]\\]\\s*<-\\s*(.+)$", body, perl = TRUE)
+    body_hit <- regmatches(body, body_match)[[1]]
+    if (length(body_hit) < 3L) {
+      return(NULL)
+    }
+
+    output_name <- trim_ws(body_hit[[2]])
+    rhs <- trim_ws(body_hit[[3]])
+    reader_fn <- plain_fn(leading_call(rhs))
+    if (!reader_fn %in% c("fromJSON", "read.csv", "read_csv", "read_tsv", "read_delim", "fread", "read_excel", "readRDS")) {
+      return(NULL)
+    }
+
+    args <- call_args(rhs)
+    if (length(args) == 0L) {
+      return(NULL)
+    }
+
+    source_arg <- trim_ws(args[[1]])
+    indexed_collection <- sub("^([[:alnum:]_.]+)\\s*\\[.*$", "\\1", source_arg, perl = TRUE)
+    if (!nzchar(indexed_collection) || identical(indexed_collection, source_arg)) {
+      if (identical(source_arg, index_name)) {
+        indexed_collection <- source_collection
+      } else if (is_plain_name(source_arg)) {
+        indexed_collection <- source_arg
+      } else {
+        indexed_collection <- source_collection
+      }
+    }
+
+    collection_info <- file_collections[[indexed_collection]]
+    collection_label <- if (!is.null(collection_info)) file_collection_label(collection_info$pattern) else "source files"
+
+    detail <- paste0("read the ", collection_label, " listed in `", indexed_collection, "` into a list of imported records")
+    if (identical(reader_fn, "fromJSON") && grepl("flatten\\s*=\\s*TRUE", rhs, perl = TRUE)) {
+      detail <- paste0(detail, "; flatten nested fields where possible")
+    }
+
+    list(
+      title = if (identical(reader_fn, "fromJSON")) "Load JSON files" else paste("Load", collection_label),
+      detail = detail,
+      source = indexed_collection,
+      output = output_name,
+      object_kind = "generic_object"
+    )
+  }
+
+  chart_step_titles <- c("Create chart", "Add chart layer", "Label chart", "Style chart", "Set chart defaults", "Arrange charts")
+  prep_step_titles <- c(
+    "Convert to data frame", "Add or change columns", "Filter rows", "Keep selected columns",
+    "Sort rows", "Rename columns", "Remove duplicates", "Reshape to long format",
+    "Reshape to wide format"
+  )
+
+  is_chart_info <- function(info) {
+    identical(info$object_kind, "plot_object") || info$title %in% chart_step_titles
+  }
+
+  is_prep_info <- function(info) {
+    info$title %in% prep_step_titles
+  }
+
+  combine_step_details <- function(infos) {
+    details <- unique(trim_ws(vapply(infos, function(info) info$detail %||% "", character(1))))
+    details <- details[nzchar(details)]
+    paste(details, collapse = "; ")
+  }
+
+  describe_chart_pipeline <- function(infos) {
+    create_info <- Filter(function(info) identical(info$title, "Create chart"), infos)
+    layer_info <- Filter(function(info) identical(info$title, "Add chart layer"), infos)
+    label_info <- Filter(function(info) identical(info$title, "Label chart"), infos)
+
+    details <- c(
+      if (length(create_info) > 0L) create_info[[1]]$detail else character(),
+      if (length(layer_info) > 0L) layer_info[[1]]$detail else character(),
+      if (length(label_info) > 0L) label_info[[1]]$detail else character()
+    )
+    details <- unique(trim_ws(details))
+    details <- details[nzchar(details)]
+
+    list(
+      title = "Create chart",
+      detail = paste(details, collapse = "; "),
+      object_kind = "plot_object"
+    )
+  }
+
   for (index in seq_along(exprs)) {
     statement <- expression_text(exprs[[index]], srcrefs[[index]])
     if (!nzchar(statement)) {
       next
     }
 
-    left_assign <- regexec("^([[:alnum:]_.]+)\\s*(<-|=)\\s*(.+)$", statement)
+    compound_assign <- regexec("^([[:alnum:]_.]+)\\s*%<>%\\s*(.+)$", statement, perl = TRUE)
+    compound_hit <- regmatches(statement, compound_assign)[[1]]
+
+    left_assign <- regexec("^([[:alnum:]_.]+)\\s*(<<?-|=)\\s*(.+)$", statement)
     left_hit <- regmatches(statement, left_assign)[[1]]
 
     right_assign <- regexec("^(.+)\\s*(->|->>)\\s*([[:alnum:]_.]+)$", statement)
     right_hit <- regmatches(statement, right_assign)[[1]]
 
+    if (length(compound_hit) > 0) {
+      lhs_name <- trim_ws(compound_hit[2])
+      rhs <- trim_ws(compound_hit[3])
+      lhs_id <- object_node(lhs_name)
+      pipe_parts <- split_pipe(rhs)
+      current_id <- lhs_id
+      current_source <- lhs_name
+
+      for (part_index in seq_along(pipe_parts)) {
+        part <- pipe_parts[[part_index]]
+        info <- describe_transform(part, source_in_call = FALSE)
+        step_id <- add_step_record(
+          kind = "transform",
+          title = info$title,
+          detail = info$detail,
+          source = current_source,
+          output = if (part_index == length(pipe_parts)) lhs_name else ""
+        )
+        add_edge(current_id, step_id, "flows")
+        current_id <- step_id
+        current_source <- if (part_index == length(pipe_parts)) lhs_name else "the result from the previous step"
+      }
+
+      final_kind <- if (length(pipe_parts) > 0L) describe_transform(pipe_parts[[length(pipe_parts)]], source_in_call = FALSE)$object_kind else "generic_object"
+      lhs_id <- object_node(lhs_name, final_kind)
+      add_edge(current_id, lhs_id, "updates")
+      next
+    }
+
     if (length(left_hit) > 0) {
       lhs_name <- trim_ws(left_hit[2])
       rhs <- trim_ws(left_hit[4])
       lhs_id <- object_node(lhs_name)
+
+      discovery_info <- describe_file_discovery(rhs)
+      if (!is.null(discovery_info)) {
+        lhs_id <- object_node(lhs_name, discovery_info$object_kind)
+        step_id <- add_step_record(
+          kind = "input",
+          title = discovery_info$title,
+          detail = discovery_info$detail,
+          output = lhs_name,
+          target_path = discovery_info$path
+        )
+        add_edge(step_id, lhs_id, "creates")
+        file_collections[[lhs_name]] <- discovery_info
+        next
+      }
 
       pipe_parts <- split_pipe(rhs)
       if (length(pipe_parts) > 1) {
@@ -448,23 +669,64 @@ ghostwriter_parse_r <- function(path) {
         current_source <- if (nzchar(source_info$source_label)) source_info$source_label else label_from_expr(pipe_parts[[1]])
         tail_parts <- pipe_parts[-1]
 
-        for (part_index in seq_along(tail_parts)) {
-          part <- tail_parts[[part_index]]
-          info <- describe_transform(part, source_in_call = FALSE)
-          output_name <- if (part_index == length(tail_parts)) lhs_name else ""
-          if (nzchar(output_name)) {
-            lhs_id <- object_node(lhs_name, info$object_kind)
-          }
+        tail_infos <- lapply(tail_parts, function(part) describe_transform(part, source_in_call = FALSE))
+        chart_start <- which(vapply(tail_infos, is_chart_info, logical(1)))
+
+        if (length(tail_infos) > 1L && length(chart_start) == 0L && all(vapply(tail_infos, is_prep_info, logical(1)))) {
+          combined_info <- list(
+            title = "Prepare data frame",
+            detail = combine_step_details(tail_infos),
+            object_kind = tail_infos[[length(tail_infos)]]$object_kind
+          )
+          lhs_id <- object_node(lhs_name, combined_info$object_kind)
           step_id <- add_step_record(
             kind = "transform",
-            title = info$title,
-            detail = info$detail,
+            title = combined_info$title,
+            detail = combined_info$detail,
             source = current_source,
-            output = output_name
+            output = lhs_name
           )
           add_edge(current_id, step_id, "flows")
-          current_id <- step_id
-          current_source <- if (nzchar(output_name)) output_name else "the result from the previous step"
+          add_edge(step_id, lhs_id, "creates")
+          next
+        }
+
+        chart_index <- if (length(chart_start) > 0L) chart_start[[1]] else NA_integer_
+        pre_chart_count <- if (is.na(chart_index)) length(tail_infos) else chart_index - 1L
+
+        if (pre_chart_count > 0L) {
+          for (part_index in seq_len(pre_chart_count)) {
+            info <- tail_infos[[part_index]]
+            output_name <- if (is.na(chart_index) && part_index == length(tail_infos)) lhs_name else ""
+            if (nzchar(output_name)) {
+              lhs_id <- object_node(lhs_name, info$object_kind)
+            }
+            step_id <- add_step_record(
+              kind = "transform",
+              title = info$title,
+              detail = info$detail,
+              source = current_source,
+              output = output_name
+            )
+            add_edge(current_id, step_id, "flows")
+            current_id <- step_id
+            current_source <- if (nzchar(output_name)) output_name else "the result from the previous step"
+          }
+        }
+
+        if (!is.na(chart_index)) {
+          chart_info <- describe_chart_pipeline(tail_infos[chart_index:length(tail_infos)])
+          lhs_id <- object_node(lhs_name, chart_info$object_kind)
+          step_id <- add_step_record(
+            kind = "transform",
+            title = chart_info$title,
+            detail = chart_info$detail,
+            source = current_source,
+            output = lhs_name
+          )
+          add_edge(current_id, step_id, "flows")
+          add_edge(step_id, lhs_id, "creates")
+          next
         }
 
         add_edge(current_id, lhs_id, "creates")
@@ -523,7 +785,70 @@ ghostwriter_parse_r <- function(path) {
       next
     }
 
+    loop_info <- describe_import_loop(statement)
+    if (!is.null(loop_info)) {
+      output_id <- object_node(loop_info$output, loop_info$object_kind)
+      source_id <- object_node(loop_info$source, "vector_object")
+      step_id <- add_step_record(
+        kind = "input",
+        title = loop_info$title,
+        detail = loop_info$detail,
+        source = loop_info$source,
+        output = loop_info$output
+      )
+      add_edge(source_id, step_id, "reads")
+      add_edge(step_id, output_id, "creates")
+      import_lists[[loop_info$output]] <- loop_info
+      next
+    }
+
+    pipe_parts <- split_pipe(statement)
+    if (length(pipe_parts) > 1L) {
+      source_info <- source_from_expr(pipe_parts[[1]])
+      current_id <- source_info$node_id
+      current_source <- if (nzchar(source_info$source_label)) source_info$source_label else label_from_expr(pipe_parts[[1]])
+      tail_parts <- pipe_parts[-1]
+      tail_infos <- lapply(tail_parts, function(part) describe_transform(part, source_in_call = FALSE))
+      chart_start <- which(vapply(tail_infos, is_chart_info, logical(1)))
+      info <- if (length(chart_start) > 0L) {
+        describe_chart_pipeline(tail_infos[chart_start[[1]]:length(tail_infos)])
+      } else {
+        list(
+          title = "Inspect intermediate results",
+          detail = combine_step_details(tail_infos),
+          object_kind = "generic_object"
+        )
+      }
+
+      step_id <- add_step_record(
+        kind = "analysis",
+        title = info$title,
+        detail = info$detail,
+        source = current_source,
+        output = ""
+      )
+      add_edge(current_id, step_id, "flows")
+      next
+    }
+
+    if (is_plain_name(statement)) {
+      source_id <- object_node(statement)
+      step_id <- add_step_record(
+        kind = "analysis",
+        title = "Display object",
+        detail = paste0("show `", statement, "` for review"),
+        source = statement,
+        output = ""
+      )
+      add_edge(source_id, step_id, "displays")
+      next
+    }
+
     fn <- leading_call(statement)
+    if (!is.null(fn) && plain_fn(fn) %in% c("library", "require")) {
+      next
+    }
+
     if (is_known_call(fn, output_funs, output_funs_base)) {
       info <- describe_output(statement)
       source_expr <- info$source_expr %||% ""
@@ -541,9 +866,29 @@ ghostwriter_parse_r <- function(path) {
       if (!is.null(info$path)) {
         add_edge(step_id, file_node(info$path, "output_file"), "writes")
       }
+      next
+    }
+
+    if (!is.null(fn)) {
+      info <- describe_transform(statement, source_in_call = TRUE)
+      source_label <- if (nzchar(info$source)) info$source else first_plain_arg(statement)
+      source_id <- if (nzchar(source_label)) object_node(source_label) else NULL
+      standalone_title <- info$title
+      if (identical(plain_fn(fn), "season")) {
+        standalone_title <- "Inspect season labels"
+      }
+      step_id <- add_step_record(
+        kind = "analysis",
+        title = standalone_title,
+        detail = info$detail,
+        source = source_label,
+        output = ""
+      )
+      add_edge(source_id, step_id, "flows")
     }
   }
 
+  steps <- annotate_superseded_steps(steps)
   edges <- unique(edges)
   list(nodes = nodes, edges = edges, steps = steps, script_path = path, language = "r")
 }
@@ -580,6 +925,7 @@ ghostwriter_parse_sql <- function(path) {
     output_columns = character(),
     carried_columns = character(),
     created_columns = character(),
+    superseded_by = character(),
     narrative = character(),
     stringsAsFactors = FALSE
   )
@@ -640,7 +986,7 @@ ghostwriter_parse_sql <- function(path) {
     }
   }
 
-  add_step_record <- function(kind, title, detail = "", source = "", output = "", target_path = "", group = "", input_columns = "", output_columns = "", carried_columns = "", created_columns = "") {
+  add_step_record <- function(kind, title, detail = "", source = "", output = "", target_path = "", group = "", input_columns = "", output_columns = "", carried_columns = "", created_columns = "", superseded_by = "") {
     step_index <<- step_index + 1L
     narrative <- build_step_narrative(kind, title, detail, source, output, target_path)
 
@@ -659,6 +1005,7 @@ ghostwriter_parse_sql <- function(path) {
         output_columns = output_columns,
         carried_columns = carried_columns,
         created_columns = created_columns,
+        superseded_by = superseded_by,
         narrative = narrative,
         stringsAsFactors = FALSE
       )
@@ -1266,7 +1613,7 @@ build_step_narrative <- function(kind, title, detail = "", source = "", output =
   detail_clause <- if (nzchar(detail)) paste0(": ", detail) else ""
 
   if (identical(kind, "input")) {
-    output_clause <- if (nzchar(output)) paste0(" to create data table `", output, "`") else ""
+    output_clause <- if (nzchar(output)) paste0(" to create `", output, "`") else ""
     return(paste0(title, detail_clause, output_clause, "."))
   }
 
@@ -1274,6 +1621,11 @@ build_step_narrative <- function(kind, title, detail = "", source = "", output =
     source_clause <- if (nzchar(source)) paste0("Using `", source, "`, ") else ""
     output_clause <- if (nzchar(output)) paste0(". This creates `", output, "`") else ""
     return(paste0(source_clause, tolower_first(title), detail_clause, output_clause, "."))
+  }
+
+  if (identical(kind, "analysis")) {
+    source_clause <- if (nzchar(source)) paste0("Using `", source, "`, ") else ""
+    return(paste0(source_clause, tolower_first(title), detail_clause, "."))
   }
 
   if (identical(kind, "output")) {
@@ -1296,6 +1648,49 @@ build_step_narrative <- function(kind, title, detail = "", source = "", output =
   }
 
   paste0(title, detail_clause, ".")
+}
+
+annotate_superseded_steps <- function(steps) {
+  if (nrow(steps) == 0L || !("output" %in% names(steps))) {
+    return(steps)
+  }
+
+  outputs <- trim_ws(steps$output)
+  steps$superseded_by[is.na(steps$superseded_by)] <- ""
+
+  repeated_outputs <- unique(outputs[nzchar(outputs) & duplicated(outputs, fromLast = TRUE)])
+  if (length(repeated_outputs) == 0L) {
+    return(steps)
+  }
+
+  for (output_name in repeated_outputs) {
+    indices <- which(outputs == output_name)
+    if (length(indices) < 2L) {
+      next
+    }
+
+    for (position in seq_len(length(indices) - 1L)) {
+      current_index <- indices[[position]]
+      next_index <- indices[[position + 1L]]
+      replacement_step <- as.character(steps$step[[next_index]])
+      note <- paste0("this version is replaced later at step ", replacement_step)
+
+      steps$superseded_by[[current_index]] <- replacement_step
+      steps$detail[[current_index]] <- if (nzchar(trim_ws(steps$detail[[current_index]]))) {
+        paste0(steps$detail[[current_index]], "; ", note)
+      } else {
+        paste0("This version is replaced later at step ", replacement_step)
+      }
+      steps$narrative[[current_index]] <- paste0(
+        sub("\\.$", "", steps$narrative[[current_index]]),
+        ". This version is replaced later at step ",
+        replacement_step,
+        "."
+      )
+    }
+  }
+
+  steps
 }
 
 object_kind_label <- function(kind, count = 1L, capitalize = TRUE) {
@@ -1440,11 +1835,12 @@ legend_dot <- function(nodes) {
     source_nodes,
     object_nodes,
     build_legend_node("legend_transform", "Transformation", "transform_step"),
+    if ("analysis_step" %in% nodes$kind) build_legend_node("legend_analysis", "Analysis", "analysis_step") else character(),
     output_nodes
   )
 
   legend_chain <- paste(
-    c(source_node_ids, object_node_ids, "legend_transform", output_node_ids),
+    c(source_node_ids, object_node_ids, "legend_transform", if ("analysis_step" %in% nodes$kind) "legend_analysis" else character(), output_node_ids),
     collapse = " -> "
   )
 
@@ -1945,14 +2341,18 @@ workflow_stats <- function(parsed) {
   nodes <- parsed$nodes
   object_counts <- named_object_kind_counts(nodes)
   object_total <- sum(object_counts)
+  input_paths <- unique(steps$target_path[steps$kind == "input" & nzchar(steps$target_path)])
+  input_nodes <- unique(nodes$key[nodes$kind %in% c("input_file", "source_table")])
+  source_count <- length(unique(c(input_paths, input_nodes)))
 
   list(
-    inputs = sum(nodes$kind %in% c("input_file", "source_table")),
+    inputs = source_count,
     datasets = object_total,
     object_counts = object_counts,
     object_label = named_object_stat_label(object_counts),
     object_breakdown = named_object_breakdown(object_counts),
     transforms = sum(steps$kind == "transform"),
+    analyses = sum(steps$kind == "analysis"),
     outputs = sum(nodes$kind %in% c("output_file", "output_table"))
   )
 }
@@ -2074,6 +2474,17 @@ step_phase_label <- function(step_row) {
     return("Outputs")
   }
 
+  if (identical(step$kind, "analysis")) {
+    if (grepl("create chart|arrange charts|set chart defaults", text, perl = TRUE)) {
+      return("Visualization")
+    }
+    return("Analysis")
+  }
+
+  if (grepl("discover source data files|load json files|prepare collection|combine imported files", text, perl = TRUE)) {
+    return("Inputs")
+  }
+
   if (grepl("fit linear model|fit generalized linear model|train predictive model|train classification model|train model", text, perl = TRUE)) {
     return("Modeling")
   }
@@ -2082,7 +2493,7 @@ step_phase_label <- function(step_row) {
     return("Scoring")
   }
 
-  if (grepl("create chart|add chart layer|label chart|style chart", text, perl = TRUE)) {
+  if (grepl("create chart|add chart layer|label chart|style chart|set chart defaults|arrange charts", text, perl = TRUE)) {
     return("Visualization")
   }
 
@@ -2090,7 +2501,7 @@ step_phase_label <- function(step_row) {
     return("Joins")
   }
 
-  if (grepl("group rows|summarize data|calculate summary metrics|average of|row count|number of distinct|return a regular table without grouping", text, perl = TRUE)) {
+  if (grepl("group rows|summarize data|count records|calculate summary metrics|average of|row count|number of distinct|return a regular table without grouping", text, perl = TRUE)) {
     return("Aggregation")
   }
 
@@ -2107,6 +2518,10 @@ step_phase_label <- function(step_row) {
   }
 
   if (grepl("^run ", tolower(step$title))) {
+    return("Analysis")
+  }
+
+  if (grepl("display object", text, perl = TRUE)) {
     return("Analysis")
   }
 
@@ -2242,6 +2657,7 @@ build_timeline_step_button <- function(step_row, active = FALSE, hidden = FALSE)
     '" data-output-columns="', html_escape(step$output_columns),
     '" data-carried-columns="', html_escape(step$carried_columns),
     '" data-created-columns="', html_escape(step$created_columns),
+    '" data-superseded-by="', html_escape(step$superseded_by),
     '">',
     '<span class="timeline-step__number">', step$step, '</span>',
     '<span class="timeline-step__body">',
@@ -2294,6 +2710,7 @@ build_html_detail_panel <- function(steps) {
     build_detail_meta_row('Source', step$source, 'detailSource'),
     build_detail_meta_row('Output', step$output, 'detailOutput'),
     build_detail_meta_row('Saved to', step$target_path, 'detailTarget'),
+    build_detail_meta_row('Replaced later', if (nzchar(step$superseded_by)) paste0("Step ", step$superseded_by) else "", 'detailSuperseded'),
     build_detail_meta_row('Input columns used', step$input_columns, 'detailInputColumns'),
     build_detail_meta_row('Output columns produced', step$output_columns, 'detailOutputColumns'),
     build_detail_meta_row('Columns carried through', step$carried_columns, 'detailCarriedColumns'),
@@ -2945,6 +3362,8 @@ html_page_js <- function() {
     '    output: document.getElementById("detailOutput"),',
     '    targetRow: document.getElementById("detailTargetRow"),',
     '    target: document.getElementById("detailTarget"),',
+    '    supersededRow: document.getElementById("detailSupersededRow"),',
+    '    superseded: document.getElementById("detailSuperseded"),',
     '    inputColumnsRow: document.getElementById("detailInputColumnsRow"),',
     '    inputColumns: document.getElementById("detailInputColumns"),',
     '    outputColumnsRow: document.getElementById("detailOutputColumnsRow"),',
@@ -3005,6 +3424,7 @@ html_page_js <- function() {
     '    setMeta(detailMap.sourceRow, detailMap.source, button.dataset.source || "");',
     '    setMeta(detailMap.outputRow, detailMap.output, button.dataset.output || "");',
     '    setMeta(detailMap.targetRow, detailMap.target, button.dataset.target || "");',
+    '    setMeta(detailMap.supersededRow, detailMap.superseded, button.dataset.supersededBy ? ("Step " + button.dataset.supersededBy) : "");',
     '    setMeta(detailMap.inputColumnsRow, detailMap.inputColumns, button.dataset.inputColumns || "");',
     '    setMeta(detailMap.outputColumnsRow, detailMap.outputColumns, button.dataset.outputColumns || "");',
     '    setMeta(detailMap.carriedColumnsRow, detailMap.carriedColumns, button.dataset.carriedColumns || "");',
@@ -3205,15 +3625,57 @@ docx_paragraph <- function(text, style = "Normal") {
 
 expression_text <- function(expr, srcref) {
   if (!is.null(srcref)) {
-    return(compact_ws(paste(as.character(srcref), collapse = "\n")))
+    return(compact_ws(strip_inline_comments(paste(as.character(srcref), collapse = "\n"))))
   }
 
-  compact_ws(paste(deparse(expr), collapse = " "))
+  compact_ws(strip_inline_comments(paste(deparse(expr), collapse = " ")))
 }
 
 compact_ws <- function(text) {
   text <- gsub("\\s+", " ", text)
   trim_ws(text)
+}
+
+strip_inline_comments <- function(text) {
+  chars <- strsplit(text, "", fixed = TRUE)[[1]]
+  pieces <- character()
+  quote_char <- ""
+  in_comment <- FALSE
+
+  for (index in seq_along(chars)) {
+    char <- chars[[index]]
+
+    if (in_comment) {
+      if (char == "\n") {
+        in_comment <- FALSE
+        pieces <- c(pieces, char)
+      }
+      next
+    }
+
+    if (nzchar(quote_char)) {
+      pieces <- c(pieces, char)
+      if (char == quote_char && (index == 1L || chars[[index - 1L]] != "\\")) {
+        quote_char <- ""
+      }
+      next
+    }
+
+    if (char %in% c("\"", "'")) {
+      quote_char <- char
+      pieces <- c(pieces, char)
+      next
+    }
+
+    if (char == "#") {
+      in_comment <- TRUE
+      next
+    }
+
+    pieces <- c(pieces, char)
+  }
+
+  paste(pieces, collapse = "")
 }
 
 trim_ws <- function(x) {
@@ -3435,20 +3897,53 @@ human_action <- function(fn) {
 
   if (!nzchar(fn)) return("Transform data")
 
-  if (fn %in% c("read.csv", "read_csv")) return("Load CSV file")
+  if (fn %in% c("read.csv", "read.csv2", "read_csv")) return("Load CSV file")
   if (fn %in% c("read_tsv")) return("Load tab-delimited file")
-  if (fn %in% c("read_delim", "fread")) return("Load data file")
-  if (fn %in% c("read_excel")) return("Load Excel file")
+  if (fn %in% c("read_delim", "read_fwf", "fread", "vroom")) return("Load data file")
+  if (fn %in% c("read_excel", "read.xlsx", "read_xlsx")) return("Load Excel file")
   if (fn %in% c("readRDS")) return("Load R data file")
+  if (fn %in% c("fromJSON")) return("Load JSON file")
   if (fn %in% c("dbGetQuery")) return("Run database query")
+  if (fn %in% c("dbReadTable")) return("Load database table")
+  if (fn %in% c("read_sas")) return("Load SAS data file")
+  if (fn %in% c("read_spss", "read_sav")) return("Load SPSS data file")
+  if (fn %in% c("read_dta", "read_stata")) return("Load Stata data file")
+  if (fn %in% c("read_parquet")) return("Load Parquet file")
+  if (fn %in% c("read_feather")) return("Load Feather file")
+  if (fn %in% c("read_csv_arrow")) return("Load CSV file")
+  if (fn %in% c("c")) return("Create reference vector")
+  if (fn %in% c("dir", "list.files")) return("Discover source data files")
+  if (fn %in% c("vector")) return("Prepare collection")
+  if (fn %in% c("bind_rows")) return("Combine imported files")
+  if (fn %in% c("as_tibble", "as.data.frame")) return("Convert to data frame")
   if (fn %in% c("transform", "mutate")) return("Add or change columns")
+  if (fn %in% c("mutate_at", "mutate_if", "mutate_all", "transmute", "transmute_at", "transmute_if", "transmute_all")) return("Add or change columns")
   if (fn %in% c("subset", "filter")) return("Filter rows")
   if (fn %in% c("select")) return("Keep selected columns")
   if (fn %in% c("arrange")) return("Sort rows")
   if (fn %in% c("group_by")) return("Group rows")
   if (fn %in% c("summarise", "summarize")) return("Summarize data")
-  if (fn %in% c("rename")) return("Rename columns")
+  if (fn %in% c("count")) return("Count records")
+  if (fn %in% c("slice_head")) return("Keep first rows")
+  if (fn %in% c("slice_tail")) return("Keep last rows")
+  if (fn %in% c("slice")) return("Keep selected rows by position")
+  if (fn %in% c("slice_sample")) return("Take a random sample of rows")
+  if (fn %in% c("slice_min")) return("Keep rows with the smallest values")
+  if (fn %in% c("slice_max")) return("Keep rows with the largest values")
+  if (fn %in% c("rename", "rename_with")) return("Rename columns")
+  if (fn %in% c("relocate")) return("Reorder columns")
   if (fn %in% c("distinct")) return("Remove duplicates")
+  if (fn %in% c("ungroup")) return("Remove row grouping")
+  if (fn %in% c("rowwise")) return("Switch to row-by-row processing mode")
+  if (fn %in% c("pull")) return("Extract column as a vector")
+  if (fn %in% c("add_count", "add_tally")) return("Add a count column")
+  if (fn %in% c("tally")) return("Count records")
+  if (fn %in% c("fill")) return("Fill missing values from adjacent rows")
+  if (fn %in% c("replace_na")) return("Replace missing values")
+  if (fn %in% c("drop_na")) return("Remove rows with missing values")
+  if (fn %in% c("coalesce")) return("Replace missing values with fallback")
+  if (fn %in% c("across")) return("Apply transformation across multiple columns")
+  if (fn %in% c("starts_with", "ends_with", "contains", "matches", "everything", "last_col")) return("Select columns by name pattern")
   if (fn %in% c("pivot_longer")) return("Reshape to long format")
   if (fn %in% c("pivot_wider")) return("Reshape to wide format")
   if (fn %in% c("left_join", "right_join", "inner_join", "full_join", "semi_join", "anti_join")) return("Join tables")
@@ -3458,6 +3953,12 @@ human_action <- function(fn) {
   if (fn %in% c("ifelse", "case_when")) return("Create conditional value")
   if (fn %in% c("cut")) return("Bucket values")
   if (fn %in% c("ggplot")) return("Create chart")
+  if (fn %in% c("e_charts")) return("Create chart")
+  if (fn %in% c("e_bar", "e_line", "e_scatter", "e_area", "e_pie")) return("Add chart layer")
+  if (fn %in% c("e_title")) return("Label chart")
+  if (fn %in% c("e_legend", "e_color", "e_tooltip", "e_labels")) return("Style chart")
+  if (fn %in% c("e_common")) return("Set chart defaults")
+  if (fn %in% c("e_arrange")) return("Arrange charts")
   if (grepl("^geom_", fn)) return("Add chart layer")
   if (fn %in% c("labs")) return("Label chart")
   if (grepl("^theme", fn)) return("Style chart")
@@ -3472,7 +3973,14 @@ human_action <- function(fn) {
 r_object_kind_from_input <- function(fn) {
   fn <- plain_fn(fn)
 
-  if (fn %in% c("read.csv", "read_csv", "read_tsv", "read_delim", "fread", "read_excel", "dbGetQuery")) {
+  if (fn %in% c(
+    "read.csv", "read.csv2", "read_csv", "read_csv_arrow", "read_tsv",
+    "read_delim", "read_fwf", "fread", "vroom",
+    "read_excel", "read.xlsx", "read_xlsx",
+    "dbGetQuery", "dbReadTable", "fromJSON",
+    "read_sas", "read_spss", "read_sav", "read_dta", "read_stata",
+    "read_parquet", "read_feather"
+  )) {
     return("data_frame")
   }
 
@@ -3498,8 +4006,28 @@ r_object_kind_from_transform <- function(text, fn = leading_call(text)) {
     return("matrix_object")
   }
 
-  if (fn %in% c("predict", "ifelse", "case_when", "cut")) {
+  if (fn %in% c("predict", "ifelse", "case_when", "cut", "c")) {
     return("vector_object")
+  }
+
+  if (fn %in% c("bind_rows")) {
+    return("data_frame")
+  }
+
+  if (fn %in% c("vector", "list")) {
+    return("generic_object")
+  }
+
+  if (fn %in% c("as_tibble", "as.data.frame", "mutate_at", "mutate_if", "mutate_all", "transmute", "transmute_at", "transmute_if", "transmute_all", "count", "tally", "add_count", "add_tally", "slice_head", "slice_tail", "slice", "slice_sample", "slice_min", "slice_max", "ungroup", "rowwise", "rename", "rename_with", "relocate", "fill", "replace_na", "drop_na", "coalesce")) {
+    return("data_frame")
+  }
+
+  if (fn %in% c("pull")) {
+    return("vector_object")
+  }
+
+  if (fn %in% c("e_charts", "e_bar", "e_line", "e_scatter", "e_area", "e_pie", "e_title", "e_legend", "e_color", "e_tooltip", "e_labels", "e_common", "e_arrange")) {
+    return("plot_object")
   }
 
   if (fn %in% c(
@@ -3665,6 +4193,10 @@ humanize_expression <- function(text) {
     return(strip_wrapping_quotes(text))
   }
 
+  text <- gsub("%<>%", " then update ", text, fixed = TRUE)
+  text <- gsub("%>%", " then ", text, fixed = TRUE)
+  text <- gsub("|>", " then ", text, fixed = TRUE)
+
   special <- humanize_special_call(text)
   if (!is.null(special)) {
     return(trim_ws(special))
@@ -3690,6 +4222,8 @@ humanize_expression <- function(text) {
     text <- gsub(pattern, replacements[[pattern]], text, perl = TRUE)
   }
 
+  text <- gsub("!([[:alnum:]_.]+)\\s+%in%\\s+([[:alnum:]_.]+)", "\\1 is not in \\2", text, perl = TRUE)
+  text <- gsub("([[:alnum:]_.]+)\\s+%in%\\s+([[:alnum:]_.]+)", "\\1 is in \\2", text, perl = TRUE)
   text <- gsub("==", " equals ", text, fixed = TRUE)
   text <- gsub("!=", " does not equal ", text, fixed = TRUE)
   text <- gsub(">=", " is at least ", text, fixed = TRUE)
@@ -3727,6 +4261,14 @@ explain_arrange <- function(args) {
 }
 
 explain_select <- function(args) {
+  neg_args <- args[grepl("^-", trim_ws(args))]
+  pos_args <- args[!grepl("^-", trim_ws(args))]
+
+  if (length(neg_args) > 0L && length(pos_args) == 0L) {
+    dropped <- vapply(sub("^-", "", trim_ws(neg_args)), humanize_expression, character(1))
+    return(paste0("drop columns ", paste(dropped, collapse = ", ")))
+  }
+
   paste0("keep columns ", paste(vapply(args, humanize_expression, character(1)), collapse = ", "))
 }
 
@@ -3766,6 +4308,15 @@ transform_detail <- function(fn, args, raw_text = "") {
     return(paste(vapply(args, explain_assignment, character(1)), collapse = "; "))
   }
 
+  if (fn %in% c("mutate_at", "mutate_if", "mutate_all", "transmute", "transmute_at", "transmute_if", "transmute_all")) {
+    if (fn == "mutate_at" && length(args) >= 2L) {
+      cols <- humanize_expression(args[[1]])
+      fun <- humanize_expression(args[[2]])
+      return(paste0("update ", cols, " using ", fun))
+    }
+    return(paste(vapply(args, humanize_expression, character(1)), collapse = "; "))
+  }
+
   if (fn %in% c("subset", "filter")) {
     return(paste(vapply(args, humanize_expression, character(1)), collapse = " and "))
   }
@@ -3778,8 +4329,28 @@ transform_detail <- function(fn, args, raw_text = "") {
     return(explain_grouping(args))
   }
 
+  if (fn %in% c("count")) {
+    group_args <- args[!grepl("^(sort|wt|name)\\s*=", args)]
+    detail <- if (length(group_args) > 0L) {
+      paste0("count records by ", paste(vapply(group_args, humanize_expression, character(1)), collapse = ", "))
+    } else {
+      "count records"
+    }
+    if (any(grepl("^sort\\s*=\\s*TRUE$", args))) {
+      detail <- paste0(detail, " and sort by the largest counts")
+    }
+    detail
+  }
+
   if (fn %in% c("arrange")) {
     return(explain_arrange(args))
+  }
+
+  if (fn %in% c("slice_head", "slice_tail")) {
+    n_arg <- named_arg_value(args, "n")
+    count_text <- if (nzchar(n_arg)) strip_wrapping_quotes(n_arg) else "a subset of"
+    direction <- if (fn == "slice_head") "first" else "last"
+    return(paste0("keep the ", direction, " ", count_text, " rows"))
   }
 
   if (fn %in% c("select")) {
@@ -3792,6 +4363,10 @@ transform_detail <- function(fn, args, raw_text = "") {
 
   if (fn %in% c("pivot_longer", "pivot_wider")) {
     return(paste(vapply(args, humanize_expression, character(1)), collapse = ", "))
+  }
+
+  if (fn %in% c("as_tibble", "as.data.frame")) {
+    return("convert the current data into a tidy data frame")
   }
 
   if (fn %in% c("left_join", "right_join", "inner_join", "full_join", "semi_join", "anti_join")) {
@@ -3819,12 +4394,72 @@ transform_detail <- function(fn, args, raw_text = "") {
     return(model_detail(fn, args))
   }
 
+  if (fn %in% c("bind_rows")) {
+    return("stack the imported records into one data frame")
+  }
+
+  if (fn %in% c("c")) {
+    return("store these values as a reusable vector")
+  }
+
+  if (fn %in% c("vector") && length(args) > 0L) {
+    collection_type <- strip_wrapping_quotes(args[[1]])
+    if (identical(collection_type, "list")) {
+      return("create an empty list to hold imported files")
+    }
+    return(paste0("create an empty ", collection_type, " collection"))
+  }
+
   if (fn == "predict") {
     return(prediction_detail(args))
   }
 
   if (fn == "ggplot") {
     return(chart_detail(args, raw_text = raw_text))
+  }
+
+  if (fn == "e_charts") {
+    if (length(args) > 0L) {
+      return(paste0("start an interactive chart using ", humanize_expression(args[[1]]), " as the main category axis"))
+    }
+    return("start an interactive chart from the current data")
+  }
+
+  if (fn %in% c("e_bar", "e_line", "e_scatter", "e_area", "e_pie")) {
+    layer <- sub("^e_", "", fn)
+    series_arg <- if (length(args) > 0L) humanize_expression(args[[1]]) else "the selected measure"
+    return(paste0("add a ", layer, " layer showing ", series_arg))
+  }
+
+  if (fn == "e_title") {
+    title_arg <- if (length(args) > 0L) strip_wrapping_quotes(args[[1]]) else "the chart"
+    subtext_arg <- named_arg_value(args, "subtext")
+    detail <- paste0("set the chart title to ", title_arg)
+    if (nzchar(subtext_arg)) {
+      detail <- paste0(detail, " with subtitle ", strip_wrapping_quotes(subtext_arg))
+    }
+    return(detail)
+  }
+
+  if (fn == "e_legend") {
+    return("configure how the chart legend is displayed")
+  }
+
+  if (fn == "e_color") {
+    return("set the chart colors and background")
+  }
+
+  if (fn == "e_tooltip") {
+    return("configure the chart tooltip behavior")
+  }
+
+  if (fn == "e_common") {
+    return("set default chart fonts and theme options for later charts")
+  }
+
+  if (fn == "e_arrange") {
+    chart_names <- if (length(args) > 0L) paste(vapply(args, humanize_expression, character(1)), collapse = ", ") else "the selected charts"
+    return(paste0("arrange ", chart_names, " into a shared display"))
   }
 
   if (grepl("^geom_", fn)) {
@@ -3913,7 +4548,7 @@ describe_transform <- function(text, source_in_call = TRUE) {
   args <- call_args(text)
   source <- ""
 
-  if (isTRUE(source_in_call) && length(args) > 0 && is_plain_name(args[[1]])) {
+  if (isTRUE(source_in_call) && length(args) > 0 && is_plain_name(args[[1]]) && !fn_plain %in% c("e_arrange")) {
     source <- args[[1]]
     args <- args[-1]
   } else if (fn_plain %in% c("lm", "glm", "ggplot")) {
@@ -3941,6 +4576,49 @@ sql_statement_list <- function(text) {
 sql_strip_comments <- function(text) {
   text <- gsub("(?s)/\\*.*?\\*/", " ", text, perl = TRUE)
   gsub("(?m)--[^\\n]*$", " ", text, perl = TRUE)
+}
+
+sql_depth0_text <- function(text) {
+  chars <- strsplit(text, "", fixed = TRUE)[[1]]
+  depth <- 0L
+  quote_char <- ""
+  result <- chars
+
+  for (i in seq_along(chars)) {
+    char <- chars[[i]]
+
+    if (nzchar(quote_char)) {
+      result[[i]] <- " "
+      if (char == quote_char && (i <= 1L || chars[[i - 1L]] != "\\")) {
+        quote_char <- ""
+      }
+      next
+    }
+
+    if (char %in% c("'", '"', "`")) {
+      quote_char <- char
+      result[[i]] <- " "
+      next
+    }
+
+    if (char %in% c("(", "[")) {
+      depth <- depth + 1L
+      result[[i]] <- " "
+      next
+    }
+
+    if (char %in% c(")", "]")) {
+      depth <- max(0L, depth - 1L)
+      result[[i]] <- " "
+      next
+    }
+
+    if (depth > 0L) {
+      result[[i]] <- " "
+    }
+  }
+
+  paste(result, collapse = "")
 }
 
 sql_describe_statement <- function(statement) {
@@ -3995,13 +4673,17 @@ sql_describe_query <- function(query_text) {
   sources <- sql_extract_sources(query_text)
   source_refs <- sql_extract_source_refs(query_text)
   joins <- sql_extract_join_specs(query_text)
-  where_clause <- sql_extract_clause(query_text, "where", c("group by", "having", "order by", "limit", "qualify", "union"))
-  group_clause <- sql_extract_clause(query_text, "group by", c("having", "order by", "limit", "qualify", "union"))
+  union_parts <- sql_union_query_parts(query_text)
+  has_union <- length(union_parts) > 1L
+  first_part <- if (has_union) union_parts[[1]] else query_text
+  where_clause <- sql_extract_clause(first_part, "where", c("group by", "having", "order by", "limit", "qualify", "union"))
+  group_clause <- sql_extract_clause(first_part, "group by", c("having", "order by", "limit", "qualify", "union"))
+  qualify_clause <- sql_extract_clause(query_text, "qualify", c("order by", "limit", "union"))
   order_clause <- sql_extract_clause(query_text, "order by", c("limit", "qualify", "union"))
   if (!nzchar(order_clause)) {
     order_clause <- sql_extract_order_clause(query_text)
   }
-  select_items <- sql_extract_select_items(query_text)
+  select_items <- sql_extract_select_items(first_part)
   has_distinct <- grepl("(?is)\\bselect\\s+distinct\\b", query_text, perl = TRUE)
   has_aggregates <- sql_has_aggregates(select_items) || nzchar(group_clause)
   computed_items <- select_items[vapply(select_items, sql_is_feature_select_item, logical(1))]
@@ -4013,6 +4695,25 @@ sql_describe_query <- function(query_text) {
   where_clause <- trim_ws(sub("(?is)\\border\\s+by\\b.*$", "", where_clause, perl = TRUE))
 
   query_steps <- list()
+
+  if (has_union) {
+    union_type <- sql_union_type_label(query_text)
+    all_union_sources <- unique(unlist(lapply(union_parts, function(p) {
+      refs <- sql_extract_source_refs(p)
+      vapply(refs, function(r) r$table, character(1))
+    }), use.names = FALSE))
+    query_steps[[length(query_steps) + 1L]] <- list(
+      title = paste0(union_type, " query branches"),
+      detail = paste0(
+        "combine results from ", length(union_parts), " separate SELECT branches",
+        if (length(all_union_sources) > 0L) paste0(" drawing from: ", paste(all_union_sources, collapse = ", ")) else ""
+      ),
+      input_columns = "",
+      output_columns = "",
+      carried_columns = "",
+      created_columns = ""
+    )
+  }
 
   if (length(sources) > 1L) {
     query_steps[[length(query_steps) + 1L]] <- list(
@@ -4069,6 +4770,17 @@ sql_describe_query <- function(query_text) {
     )
   }
 
+  if (nzchar(qualify_clause)) {
+    query_steps[[length(query_steps) + 1L]] <- list(
+      title = "Filter grouped results",
+      detail = humanize_sql_expression(qualify_clause),
+      input_columns = sql_clause_column_inventory(qualify_clause),
+      output_columns = "",
+      carried_columns = "",
+      created_columns = ""
+    )
+  }
+
   if (nzchar(order_clause)) {
     query_steps[[length(query_steps) + 1L]] <- list(
       title = "Sort rows",
@@ -4105,14 +4817,16 @@ sql_describe_query <- function(query_text) {
 }
 
 sql_extract_order_clause <- function(query_text) {
-  hit <- regexec("(?is)\\border\\s+by\\b\\s+(.+?)(?:;|$)", query_text, perl = TRUE)
-  capture <- regmatches(query_text, hit)[[1]]
-
-  if (length(capture) < 2L) {
+  text <- compact_ws(query_text)
+  depth0 <- sql_depth0_text(text)
+  m <- regexpr("(?is)\\border\\s+by\\b\\s+", depth0, perl = TRUE)
+  if (m[[1]] < 0L) {
     return("")
   }
-
-  compact_ws(capture[[2]])
+  start <- m[[1]] + attr(m, "match.length")
+  value <- substr(text, start, nchar(text))
+  value <- sub("(?is)\\s*;.*$", "", value, perl = TRUE)
+  compact_ws(value)
 }
 
 sql_query_text <- function(statement) {
@@ -4367,6 +5081,15 @@ sql_stage_group_label <- function(name = "", final = FALSE) {
   "SQL workflow"
 }
 
+sql_union_type_label <- function(query_text) {
+  depth0 <- sql_depth0_text(compact_ws(query_text))
+  if (grepl("(?is)\\bunion\\s+all\\b", depth0, perl = TRUE)) return("Combine all")
+  if (grepl("(?is)\\bunion\\b", depth0, perl = TRUE)) return("Combine unique")
+  if (grepl("(?is)\\bintersect\\b", depth0, perl = TRUE)) return("Intersect")
+  if (grepl("(?is)\\bexcept\\b", depth0, perl = TRUE)) return("Subtract")
+  "Combine"
+}
+
 sql_is_copy_table_export <- function(statement) {
   grepl(
     "(?is)^copy\\s+(?!\\()([[:alnum:]_.$\"]+)\\s+to\\s+['\"][^'\"]+['\"]",
@@ -4375,15 +5098,35 @@ sql_is_copy_table_export <- function(statement) {
   )
 }
 
-sql_extract_sources <- function(query_text) {
-  refs <- sql_extract_source_refs(query_text)
-  if (length(refs) == 0L) {
-    return(character())
+sql_union_query_parts <- function(query_text) {
+  text <- compact_ws(query_text)
+  depth0 <- sql_depth0_text(text)
+  positions <- gregexpr("(?is)\\b(?:union(?:\\s+all)?|intersect|except)\\b", depth0, perl = TRUE)[[1]]
+  if (positions[[1]] < 0L) {
+    return(list(text))
   }
+  lengths <- attr(positions, "match.length")
+  parts <- character()
+  prev_end <- 1L
+  for (i in seq_along(positions)) {
+    parts <- c(parts, trim_ws(substr(text, prev_end, positions[[i]] - 1L)))
+    prev_end <- positions[[i]] + lengths[[i]]
+  }
+  parts <- c(parts, trim_ws(substr(text, prev_end, nchar(text))))
+  as.list(parts[nzchar(trim_ws(parts))])
+}
 
-  names <- vapply(refs, function(ref) ref$table, character(1))
+sql_extract_sources <- function(query_text) {
+  parts <- sql_union_query_parts(query_text)
   cte_names <- sql_cte_names(query_text)
-  unique(names[!(tolower(names) %in% tolower(cte_names))])
+  all_names <- character()
+  for (part in parts) {
+    refs <- sql_extract_source_refs(part)
+    if (length(refs) == 0L) next
+    names <- vapply(refs, function(ref) ref$table, character(1))
+    all_names <- c(all_names, names[!(tolower(names) %in% tolower(cte_names))])
+  }
+  unique(all_names)
 }
 
 sql_extract_source_refs <- function(query_text) {
@@ -4451,8 +5194,10 @@ sql_extract_join_specs <- function(query_text) {
 
 sql_extract_clause <- function(query_text, clause, terminators) {
   text <- compact_ws(query_text)
+  depth0 <- sql_depth0_text(text)
+
   clause_pattern <- paste0("(?is)\\b", gsub("\\s+", "\\\\s+", trim_ws(clause)), "\\b\\s+")
-  start_match <- regexpr(clause_pattern, text, perl = TRUE)
+  start_match <- regexpr(clause_pattern, depth0, perl = TRUE)
   start <- start_match[[1]]
   if (start < 0L) {
     return("")
@@ -4460,6 +5205,7 @@ sql_extract_clause <- function(query_text, clause, terminators) {
 
   content_start <- start + attr(start_match, "match.length")
   value <- trim_ws(substr(text, content_start, nchar(text)))
+  depth0_value <- trim_ws(substr(depth0, content_start, nchar(depth0)))
   if (!nzchar(value)) {
     return("")
   }
@@ -4467,7 +5213,7 @@ sql_extract_clause <- function(query_text, clause, terminators) {
   if (length(terminators) > 0L) {
     end_positions <- vapply(terminators, function(term) {
       term_pattern <- paste0("(?is)\\b", gsub("\\s+", "\\\\s+", trim_ws(term)), "\\b")
-      pos <- regexpr(term_pattern, value, perl = TRUE)[[1]]
+      pos <- regexpr(term_pattern, depth0_value, perl = TRUE)[[1]]
       if (pos < 0L) Inf else pos
     }, numeric(1))
 
@@ -4591,6 +5337,14 @@ sql_select_item_inventory <- function(item, source_column_map = list()) {
     return(list(carried = character(), created = alias_name))
   }
 
+  tsql <- sql_tsql_alias_parts(item)
+  if (!is.null(tsql)) {
+    if (sql_is_plain_column_reference(tsql$expression)) {
+      return(list(carried = tsql$alias, created = character()))
+    }
+    return(list(carried = character(), created = tsql$alias))
+  }
+
   if (sql_is_plain_column_reference(item)) {
     return(list(carried = sql_clean_identifier(sub("^.*\\.", "", item, perl = TRUE)), created = character()))
   }
@@ -4692,33 +5446,28 @@ sql_select_item_input_columns <- function(item, keep_wildcards = FALSE) {
   alias_match <- regexec("(?is)^(.+?)\\s+as\\s+([[:alnum:]_.$\"]+)$", item, perl = TRUE)
   alias_hit <- regmatches(item, alias_match)[[1]]
   expression_text <- if (length(alias_hit) >= 3L) trim_ws(alias_hit[[2]]) else item
+  tsql <- sql_tsql_alias_parts(item)
+  if (!is.null(tsql)) {
+    expression_text <- tsql$expression
+  }
 
   sql_extract_expression_columns(expression_text, keep_wildcards = keep_wildcards)
 }
 
 sql_select_item_output_column <- function(item) {
   item <- trim_ws(item)
-  if (!nzchar(item)) {
-    return("")
-  }
-
-  if (identical(item, "*")) {
-    return("all selected columns")
-  }
-
-  if (grepl("\\.\\*$", item, perl = TRUE)) {
-    return(paste0("all columns from ", sub("\\.\\*$", "", item, perl = TRUE)))
-  }
+  if (!nzchar(item)) return("")
+  if (identical(item, "*")) return("all selected columns")
+  if (grepl("\\.\\*$", item, perl = TRUE)) return(paste0("all columns from ", sub("\\.\\*$", "", item, perl = TRUE)))
 
   alias_match <- regexec("(?is)^(.+?)\\s+as\\s+([[:alnum:]_.$\"]+)$", item, perl = TRUE)
   alias_hit <- regmatches(item, alias_match)[[1]]
-  if (length(alias_hit) >= 3L) {
-    return(sql_clean_identifier(alias_hit[[3]]))
-  }
+  if (length(alias_hit) >= 3L) return(sql_clean_identifier(alias_hit[[3]]))
 
-  if (grepl("^[[:alnum:]_.$]+$", item, perl = TRUE)) {
-    return(sql_clean_identifier(sub("^.*\\.", "", item, perl = TRUE)))
-  }
+  tsql <- sql_tsql_alias_parts(item)
+  if (!is.null(tsql)) return(tsql$alias)
+
+  if (grepl("^[[:alnum:]_.$]+$", item, perl = TRUE)) return(sql_clean_identifier(sub("^.*\\.", "", item, perl = TRUE)))
 
   humanize_sql_expression(item)
 }
@@ -4801,7 +5550,14 @@ sql_reserved_words <- function() {
     "union", "all", "as", "and", "or", "not", "in", "is", "null", "case", "when",
     "then", "else", "end", "with", "create", "table", "view", "materialized", "temporary",
     "temp", "insert", "into", "copy", "to", "unload", "over", "partition", "rows",
-    "range", "current", "row", "preceding", "following", "true", "false", "date"
+    "range", "current", "row", "preceding", "following", "true", "false", "date",
+    "between", "like", "ilike", "rlike", "similar", "exists", "any", "some",
+    "intersect", "except", "lateral", "natural", "using",
+    "delete", "update", "merge", "set", "values", "truncate", "drop", "alter",
+    "begin", "declare", "execute", "call", "returns", "return",
+    "interval", "extract", "cast", "convert", "trim", "replace", "escape",
+    "window", "recursive", "volatile", "stable", "immutable", "if", "else",
+    "for", "while", "loop", "exit", "continue", "raise", "notice", "exception"
   )
 }
 
@@ -4828,12 +5584,16 @@ regex_escape <- function(text) {
   gsub("([][{}()+*^$|\\\\.?])", "\\\\\\1", text, perl = TRUE)
 }
 
+sql_aggregate_pattern <- function() {
+  "(?i)\\b(sum|avg|count|min|max|string_agg|array_agg|median|stddev|stddev_pop|stddev_samp|variance|var_pop|var_samp|percentile_cont|percentile_disc|approx_count_distinct|approx_percentile|listagg|wm_concat|group_concat|first_value|last_value|nth_value|mode|kurtosis|skewness)\\s*\\("
+}
+
 sql_has_aggregates <- function(select_items) {
   if (length(select_items) == 0L) {
     return(FALSE)
   }
 
-  any(grepl("(?i)\\b(sum|avg|count|min|max|string_agg|array_agg)\\s*\\(", select_items, perl = TRUE))
+  any(grepl(sql_aggregate_pattern(), select_items, perl = TRUE))
 }
 
 sql_join_detail <- function(sources, joins) {
@@ -4927,7 +5687,7 @@ sql_summarize_detail <- function(select_items, group_clause = "") {
     }
   }
 
-  metric_items <- select_items[grepl("(?i)\\b(sum|avg|count|min|max|string_agg|array_agg)\\s*\\(", select_items, perl = TRUE)]
+  metric_items <- select_items[grepl(sql_aggregate_pattern(), select_items, perl = TRUE)]
   if (length(metric_items) > 0L) {
     details <- c(
       details,
@@ -4981,13 +5741,18 @@ sql_select_detail <- function(select_items) {
 
 sql_select_item_detail <- function(item) {
   item <- trim_ws(item)
+
   alias_match <- regexec("(?is)^(.+?)\\s+as\\s+([[:alnum:]_.$\"]+)$", item, perl = TRUE)
   alias_hit <- regmatches(item, alias_match)[[1]]
-
   if (length(alias_hit) >= 3L) {
     alias_name <- sql_clean_identifier(alias_hit[[3]])
     expression_text <- trim_ws(alias_hit[[2]])
     return(paste0(alias_name, " = ", sql_humanize_alias_expression(alias_name, expression_text)))
+  }
+
+  tsql <- sql_tsql_alias_parts(item)
+  if (!is.null(tsql)) {
+    return(paste0(tsql$alias, " = ", sql_humanize_alias_expression(tsql$alias, tsql$expression)))
   }
 
   humanize_sql_expression(item)
@@ -5022,7 +5787,7 @@ sql_feature_detail <- function(select_items) {
 
 sql_is_feature_select_item <- function(item) {
   item <- trim_ws(item)
-  if (grepl("(?i)\\b(sum|avg|count|min|max|string_agg|array_agg)\\s*\\(", item, perl = TRUE)) {
+  if (grepl(sql_aggregate_pattern(), item, perl = TRUE)) {
     return(FALSE)
   }
 
@@ -5032,6 +5797,11 @@ sql_is_feature_select_item <- function(item) {
   if (length(alias_hit) >= 3L) {
     expr <- trim_ws(alias_hit[[2]])
     return(!grepl("^[[:alnum:]_.$]+$", expr))
+  }
+
+  tsql <- sql_tsql_alias_parts(item)
+  if (!is.null(tsql)) {
+    return(!grepl("^[[:alnum:]_.$]+$", tsql$expression))
   }
 
   grepl("\\(|\\+|-|\\*|/|\\bcase\\b", item, ignore.case = TRUE, perl = TRUE)
@@ -5113,6 +5883,17 @@ humanize_sql_expression <- function(text) {
   trim_ws(text)
 }
 
+sql_tsql_alias_parts <- function(item) {
+  item <- trim_ws(item)
+  m <- regexec("^([[:alpha:]][[:alnum:]_]*)\\s*=\\s*(.+)$", item, perl = TRUE)
+  hit <- regmatches(item, m)[[1]]
+  if (length(hit) < 3L) return(NULL)
+  alias <- trim_ws(hit[[2]])
+  expr <- trim_ws(hit[[3]])
+  if (grepl("^[[:digit:]]", expr) || grepl("^['\"]", expr)) return(NULL)
+  list(alias = alias, expression = expr)
+}
+
 sql_clean_identifier <- function(name) {
   name <- trim_ws(name)
   name <- gsub('^"|"$', "", name)
@@ -5139,6 +5920,7 @@ node_style <- function(kind) {
     input_step = list(shape = "box", fillcolor = "#f8efc8", color = "#b9911f", fontcolor = "#5c4710", style = "rounded,filled", penwidth = "1.5"),
     output_step = list(shape = "box", fillcolor = "#f3ddcf", color = "#b9653d", fontcolor = "#66321b", style = "rounded,filled", penwidth = "1.5"),
     transform_step = list(shape = "box", fillcolor = "#dbeac8", color = "#72984f", fontcolor = "#2f4d19", style = "rounded,filled", penwidth = "1.5"),
+    analysis_step = list(shape = "box", fillcolor = "#e5ebf4", color = "#6f7f96", fontcolor = "#28323f", style = "rounded,filled", penwidth = "1.5"),
     list(shape = "box", fillcolor = "#e5e7eb", color = "#6b7280", fontcolor = "#111827", style = "filled", penwidth = "1.2")
   )
 }
