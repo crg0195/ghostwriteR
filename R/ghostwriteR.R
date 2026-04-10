@@ -1137,6 +1137,7 @@ ghostwriter_parse_sql <- function(path) {
 
     if (length(stage$sources) > 0L) {
       source_metadata <- lapply(stage$sources, result_metadata)
+      names(source_metadata) <- stage$sources
       resolved_inventory <- sql_resolve_query_inventory(stage, source_metadata)
       current_ids <- unique(vapply(stage$sources, function(source_name) source_node_id(source_name, group = group), character(1)))
       current_source_label <- paste(stage$sources, collapse = ", ")
@@ -5648,10 +5649,23 @@ sql_source_column_map <- function(source_refs, source_metadata) {
     return(list())
   }
 
+  metadata_names <- names(source_metadata) %||% character()
   map <- list()
   for (index in seq_along(source_refs)) {
     ref <- source_refs[[index]]
-    metadata <- source_metadata[[index]]
+    metadata <- NULL
+
+    if (length(metadata_names) > 0L && !is.null(ref$table) && nzchar(ref$table)) {
+      name_match <- match(tolower(ref$table), tolower(metadata_names))
+      if (!is.na(name_match)) {
+        metadata <- source_metadata[[name_match]]
+      }
+    }
+
+    if (is.null(metadata) && index <= length(source_metadata)) {
+      metadata <- source_metadata[[index]]
+    }
+
     if (is.null(metadata)) {
       next
     }
