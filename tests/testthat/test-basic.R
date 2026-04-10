@@ -42,9 +42,9 @@ test_that("R parser handles realistic workflow details for handoff users", {
   steps <- parsed$steps
   stats <- ghostwriteR:::workflow_stats(parsed)
 
-  filter_step <- steps[steps$title == "Filter rows", , drop = FALSE]
-  expect_true(any(grepl("customer_id is present", filter_step$detail, fixed = TRUE)))
-  expect_false(any(grepl("!customer_id is missing", filter_step$detail, fixed = TRUE)))
+  prep_step <- steps[steps$title == "Prepare data frame", , drop = FALSE]
+  expect_true(any(grepl("customer_id is present", prep_step$detail, fixed = TRUE)))
+  expect_false(any(grepl("!customer_id is missing", prep_step$detail, fixed = TRUE)))
 
   model_step <- steps[steps$title == "Fit linear model", , drop = FALSE]
   expect_true(any(model_step$source == "sales_enriched"))
@@ -190,9 +190,9 @@ test_that("R parser handles magrittr pipes and older tidyverse verbs cleanly", {
   steps <- parsed$steps
 
   expect_true(any(steps$title == "Filter rows" & steps$output == "streamingData1"))
-  expect_true(any(steps$title == "Convert to data frame"))
-  expect_true(any(steps$title == "Add or change columns" & grepl("update ts using ymd_hms", steps$detail, fixed = TRUE)))
-  expect_true(any(grepl('date = floor_date\\(ts, "day"\\) then as_date', steps$detail)))
+  expect_true(any(steps$title == "Prepare data frame"))
+  expect_true(any(steps$title == "Prepare data frame" & grepl("update ts using ymd_hms", steps$detail, fixed = TRUE)))
+  expect_true(any(steps$title == "Prepare data frame" & grepl('date = floor_date\\(ts, "day"\\) then as_date', steps$detail)))
   expect_true(any(grepl("artist is not in blocked_artists", steps$detail, fixed = TRUE)))
 })
 
@@ -225,7 +225,7 @@ test_that("R parser ignores commented-out pipe fragments and captures standalone
   expect_false(any(grepl("floor_date\\(date, \"month\"\\)", steps$detail)))
   expect_true(any(steps$title == "Set chart defaults"))
   expect_true(any(steps$title == "Arrange charts"))
-  expect_true(sum(steps$title == "Count records") >= 3)
+  expect_true(any(steps$title == "Inspect intermediate results"))
   expect_true(any(steps$title == "Display object" & steps$source == "songs"))
 })
 
@@ -251,4 +251,28 @@ test_that("R parser marks overwritten objects as replaced later", {
   expect_true(grepl("replaced later at step", season_steps$detail[[1]], fixed = TRUE))
   expect_true(nzchar(counts_steps$superseded_by[[1]]))
   expect_equal(counts_steps$superseded_by[[1]], as.character(counts_steps$step[[2]]))
+})
+
+test_that("R parser collapses chart-building pipelines and exploratory pipes", {
+  tmp <- tempfile(fileext = ".R")
+  writeLines(c(
+    'mins <- season %>% filter(ms_played >= 1000) %>% group_by(season) %>% summarise(totals = sum(minutes)) %>% arrange(desc(totals)) %>% e_charts(season) %>% e_bar(totals, name = "Total Minutes") %>% e_title("Total Minutes Listened", subtext = "Cumulative 2014-2023")',
+    'season %>% filter(ms_played >= 1000) %>% group_by(season) %>% summarise(totals = sum(minutes)) %>% arrange(desc(totals))',
+    'season(streamingData$date, lang = "en")',
+    'streamingData <- streamingData1 %>% as_tibble() %>% mutate_at("ts", ymd_hms) %>% mutate(date = floor_date(ts, "day") %>% as_date)'
+  ), tmp)
+
+  parsed <- ghostwriteR:::ghostwriter_parse(tmp)
+  steps <- parsed$steps
+  stats <- ghostwriteR:::workflow_stats(parsed)
+
+  chart_steps <- steps[steps$output == "mins", , drop = FALSE]
+  expect_true(any(chart_steps$title == "Create chart"))
+  expect_false(any(chart_steps$title %in% c("Add chart layer", "Label chart", "Style chart")))
+
+  inspect_steps <- steps[steps$kind == "analysis", , drop = FALSE]
+  expect_true(any(inspect_steps$title == "Inspect intermediate results"))
+  expect_true(any(inspect_steps$title == "Inspect season labels"))
+  expect_true(any(steps$title == "Prepare data frame" & steps$output == "streamingData"))
+  expect_true(stats$transforms < nrow(steps))
 })
