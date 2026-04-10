@@ -374,3 +374,18 @@ test_that("filter grouped results is classified as aggregation in the timeline",
 
   expect_equal(ghostwriteR:::step_phase_label(step_row), "Aggregation")
 })
+
+test_that("sql source column map tolerates unmatched source refs", {
+  source_refs <- list(
+    list(alias = "a", table = "known_table"),
+    list(alias = "b", table = "unmatched_table")
+  )
+  source_metadata <- list(
+    known_table = list(output_columns = "id, amount")
+  )
+
+  expect_no_error(map <- ghostwriteR:::sql_source_column_map(source_refs, source_metadata))
+  expect_equal(map$a, c("id", "amount"))
+  expect_equal(map$known_table, c("id", "amount"))
+})
+

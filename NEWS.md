@@ -1,5 +1,9 @@
 # ghostwriteR news
 
+## ghostwriteR 0.0.6
+
+- Fixed a SQL inventory edge case that could error with `subscript out of bounds` when source references outnumbered available source metadata.
+
 ## ghostwriteR 0.0.5
 
 - Added richer HTML step detail panes with an Explanation section and collapsible code chunks.
