@@ -1,5 +1,10 @@
 # ghostwriteR news
 
+## ghostwriteR 0.0.7
+
+- Split the package code into focused modules for parsing, humanization, HTML output, reporting, graph generation, and utilities so future debugging and iteration are easier.
+- Improved SQL CTE documentation to summarize working datasets and main queries more clearly, with better stage-scoped code chunks and handling for divider comments such as `--------- MAIN QUERY ---------`.
+
 ## ghostwriteR 0.0.6
 
 - Fixed a SQL inventory edge case that could error with `subscript out of bounds` when source references outnumbered available source metadata.
