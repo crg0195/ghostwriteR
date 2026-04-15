@@ -27,6 +27,8 @@ test_that("ghostwriteR exports a self-contained html page with timeline and grap
   expect_false(grepl('ch === """', html, fixed = TRUE))
   expect_match(html, 'graphZoomInButton', fixed = TRUE)
   expect_match(html, 'graphFitButton', fixed = TRUE)
+  expect_match(html, 'svg.style.setProperty("width"', fixed = TRUE)
+  expect_false(grepl('width: auto !important', html, fixed = TRUE))
   expect_match(html, 'filtered_sales.csv', fixed = TRUE)
   expect_false(grepl('<script[^>]+src=', html, perl = TRUE))
   expect_false(grepl('<link[^>]+href=', html, perl = TRUE))
