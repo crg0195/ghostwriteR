@@ -25,7 +25,7 @@ remotes::install_github("crg0195/ghostwriteR")
 For a stable shared version, install from a tagged release:
 
 ```r
-remotes::install_github("crg0195/ghostwriteR", ref = "v0.0.9")
+remotes::install_github("crg0195/ghostwriteR", ref = "v0.0.10")
 ```
 
 ## Quick Start

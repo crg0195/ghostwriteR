@@ -1,5 +1,10 @@
 # ghostwriteR news
 
+## ghostwriteR 0.0.10
+
+- Fixed graph zoom controls in generated HTML so the visible `+`, `-`, `Fit`, and `100%` buttons now visibly resize large dependency graphs.
+- Added regression coverage to ensure exported HTML keeps the JS-driven graph sizing behavior and avoids conflicting SVG width rules.
+
 ## ghostwriteR 0.0.9
 
 - Fixed a bundled HTML regression that could break all click interactions by emitting malformed inline JavaScript in the generated page.
