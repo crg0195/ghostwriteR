@@ -1,5 +1,12 @@
 # ghostwriteR news
 
+## ghostwriteR 0.0.8
+
+- Improved HTML readability for large workflows with expandable step details, expandable inventories, and visible graph zoom controls in both bundled and graph-only HTML outputs.
+- Added a dedicated Setup phase for R workflows so folder paths, runtime dates, helper functions, and workspace-clearing steps appear before file loading in the timeline.
+- Improved R helper-function and loop handling so repeated per-file or per-sample workflows are summarized more clearly instead of collapsing into raw `for (...)` text.
+- Expanded plain-language coverage for spatial-analysis scripts, including clearer labels and explanations for `Load10X_Spatial`, `PercentageFeatureSet`, `AddMetaData`, `SCTransform`, `SpatialFeaturePlot`, `SpatialDimPlot`, and related setup/output steps.
+
 ## ghostwriteR 0.0.7
 
 - Split the package code into focused modules for parsing, humanization, HTML output, reporting, graph generation, and utilities so future debugging and iteration are easier.

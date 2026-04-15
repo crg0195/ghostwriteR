@@ -30,14 +30,14 @@ ghostwriter_parse_r <- function(path) {
 
   input_funs <- c(
     "read.csv", "read.csv2", "readRDS", "readr::read_csv", "readr::read_tsv",
-    "readr::read_delim", "readr::read_fwf", "readxl::read_excel",
+    "readr::read_delim", "readr::read_fwf", "readxl::read_excel", "readxl::read_xlsx",
     "openxlsx::read.xlsx", "openxlsx2::read_xlsx",
     "data.table::fread", "DBI::dbGetQuery", "DBI::dbReadTable",
     "jsonlite::fromJSON", "fromJSON",
     "haven::read_sas", "haven::read_spss", "haven::read_sav",
     "haven::read_dta", "haven::read_stata",
     "arrow::read_parquet", "arrow::read_feather", "arrow::read_csv_arrow",
-    "vroom::vroom"
+    "vroom::vroom", "load", "base::load", "data", "utils::data"
   )
 
   output_funs <- c(
@@ -91,6 +91,7 @@ ghostwriter_parse_r <- function(path) {
   node_ids <- character()
   file_collections <- list()
   import_lists <- list()
+  helper_functions <- list()
   current_code_chunk <- ""
 
   node_kind_rank <- function(kind) {
@@ -152,6 +153,15 @@ ghostwriter_parse_r <- function(path) {
   }
 
   add_step_record <- function(kind, title, detail = "", source = "", output = "", target_path = "", group = "", input_columns = "", output_columns = "", carried_columns = "", created_columns = "", superseded_by = "", code = current_code_chunk, explanation = "") {
+    if (!nzchar(group)) {
+      group <- switch(
+        kind,
+        input = "Inputs",
+        output = "Outputs",
+        ""
+      )
+    }
+
     step_index <<- step_index + 1L
     narrative <- build_step_narrative(kind, title, detail, source, output, target_path)
     if (!nzchar(explanation)) {
@@ -371,6 +381,263 @@ ghostwriter_parse_r <- function(path) {
     )
   }
 
+  describe_generic_loop <- function(text) {
+    text <- compact_ws(text)
+    if (!grepl("^for\\s*\\(", text, perl = TRUE)) {
+      return(NULL)
+    }
+
+    loop_match <- regexec("^for\\s*\\((.+)\\)\\s*\\{\\s*(.+)\\s*\\}$", text, perl = TRUE)
+    loop_hit <- regmatches(text, loop_match)[[1]]
+    if (length(loop_hit) < 3L) {
+      return(NULL)
+    }
+
+    header <- trim_ws(loop_hit[[2]])
+    body <- compact_ws(loop_hit[[3]])
+    header_parts <- strsplit(header, "\\s+in\\s+", perl = TRUE)[[1]]
+    if (length(header_parts) < 2L) {
+      return(NULL)
+    }
+
+    iterator <- trim_ws(header_parts[[1]])
+    collection <- trim_ws(paste(header_parts[-1], collapse = " in "))
+
+    indexed_match <- regexec("^(?:seq_along|1:length)\\(([^)]+)\\)$", collection, perl = TRUE)
+    indexed_hit <- regmatches(collection, indexed_match)[[1]]
+    if (length(indexed_hit) >= 2L) {
+      collection_base <- trim_ws(indexed_hit[[2]])
+    } else {
+      indexed_match <- regexec("^seq_len\\(length\\(([^)]+)\\)\\)$", collection, perl = TRUE)
+      indexed_hit <- regmatches(collection, indexed_match)[[1]]
+      collection_base <- if (length(indexed_hit) >= 2L) trim_ws(indexed_hit[[2]]) else collection
+    }
+
+    collection_name <- if (is_plain_name(collection_base)) collection_base else collection
+    collection_label <- if (is_plain_name(collection_name)) paste0("`", collection_name, "`") else humanize_expression(collection_name)
+    item_label <- if (grepl("\\bfiles?\\b", collection_name, perl = TRUE)) {
+      paste0("file referenced by ", collection_label)
+    } else if (grepl("\\bsamples?\\b|\\bspots?\\b", collection_name, perl = TRUE)) {
+      paste0("sample in ", collection_label)
+    } else {
+      paste0("item in ", collection_label)
+    }
+
+    title <- if (grepl("\\bLoad10X_Spatial\\s*\\(", body, perl = TRUE)) {
+      "Repeat sample workflow for each file"
+    } else if (grepl("\\bfiles?\\b", collection_name, perl = TRUE)) {
+      "Repeat workflow for each file"
+    } else {
+      "Repeat workflow in a loop"
+    }
+
+    actions <- character()
+    if (grepl("\\bLoad10X_Spatial\\s*\\(", body, perl = TRUE)) {
+      actions <- c(actions, "load one spatial sample")
+    }
+    if (grepl("\\b(read_excel|read_xlsx|read_csv|read\\.csv|fromJSON|fread|load)\\s*\\(", body, perl = TRUE)) {
+      actions <- c(actions, "read the required data for that iteration")
+    }
+    if (grepl("\\b(AddMetaData|\\$[[:alnum:]_.]+\\s*<-)\\b", body, perl = TRUE)) {
+      actions <- c(actions, "attach metadata or labels")
+    }
+    if (grepl("\\bPercentageFeatureSet\\s*\\(", body, perl = TRUE)) {
+      actions <- c(actions, "calculate quality-control metrics")
+    }
+    if (grepl("\\bSCTransform\\s*\\(", body, perl = TRUE)) {
+      actions <- c(actions, "normalize expression counts")
+    }
+    if (grepl("\\b(subset|filter|setdiff|grepl)\\s*\\(", body, perl = TRUE) || grepl("\\[[^]]+,\\s*[^]]+\\]", body, perl = TRUE)) {
+      actions <- c(actions, "filter the data when needed")
+    }
+    if (grepl("\\b(SpatialFeaturePlot|SpatialDimPlot|VlnPlot|FeaturePlot|DimPlot|ggplot|kable)\\s*\\(", body, perl = TRUE)) {
+      actions <- c(actions, "create review plots or tables")
+    }
+    if (grepl("\\bif\\s*\\(", body, perl = TRUE)) {
+      actions <- c(actions, "apply conditional rules for special cases")
+    }
+    if (grepl("\\bsave\\s*\\(", body, perl = TRUE) || grepl("\\bwrite\\.[[:alnum:]_]+\\s*\\(", body, perl = TRUE)) {
+      actions <- c(actions, "save output for each iteration")
+    }
+    actions <- unique(actions)
+
+    detail <- paste0("run the enclosed workflow once for each ", item_label)
+    if (length(actions) > 0L) {
+      detail <- paste0(detail, "; ", paste(actions, collapse = "; "))
+    }
+
+    list(
+      title = title,
+      detail = detail,
+      source = if (is_plain_name(collection_name)) collection_name else "",
+      group = "",
+      kind = "analysis"
+    )
+  }
+
+  describe_setup_assignment <- function(lhs_name, rhs) {
+    rhs <- trim_ws(rhs)
+    if (!nzchar(rhs) || grepl("^function\\s*\\(", rhs, perl = TRUE)) {
+      return(NULL)
+    }
+
+    fn <- plain_fn(leading_call(rhs))
+    if (nzchar(fn) && !fn %in% c("Sys.Date", "Sys.time", "as.Date", "as.POSIXct", "as.POSIXlt", "paste", "paste0", "file.path")) {
+      return(NULL)
+    }
+
+    literal_value <- extract_string_literal(rhs)
+    if (!is.null(literal_value) && grepl("^(?:[A-Za-z]:[/\\\\]|/|~)", literal_value, perl = TRUE)) {
+      path_value <- display_path_value(literal_value)
+      lower_name <- tolower(lhs_name)
+      title <- if (grepl("output|out|export|save|result", lower_name, perl = TRUE)) {
+        "Set output path"
+      } else if (grepl("file", lower_name, perl = TRUE) && !grepl("dir|folder|path", lower_name, perl = TRUE)) {
+        "Set file path"
+      } else {
+        "Set folder path"
+      }
+      return(list(
+        title = title,
+        detail = paste0("store ", path_value, " in `", lhs_name, "` so later steps can build consistent file locations"),
+        explanation = paste0("`", lhs_name, "` is a setup path used later when the script builds file names or save locations."),
+        object_kind = "generic_object"
+      ))
+    }
+
+    if (fn %in% c("Sys.Date", "Sys.time")) {
+      label <- if (identical(fn, "Sys.Date")) "today's date" else "the current timestamp"
+      return(list(
+        title = if (identical(fn, "Sys.Date")) "Set runtime date" else "Set runtime timestamp",
+        detail = paste0("store ", label, " in `", lhs_name, "` so later steps can compare file timing against the current run"),
+        explanation = paste0("`", fn, "()` uses the computer's current date/time when the script runs, so this value changes from run to run."),
+        object_kind = "generic_object"
+      ))
+    }
+
+    if (fn %in% c("as.Date", "as.POSIXct", "as.POSIXlt", "paste", "paste0") &&
+        grepl("Sys\\.Date\\s*\\(", rhs, perl = TRUE)) {
+      return(list(
+        title = "Define date cutoff",
+        detail = paste0("build a runtime date or timestamp in `", lhs_name, "` from the current date so later steps can decide which files belong in this run"),
+        explanation = "This setup value is dynamic: it is computed from the current date when the script runs rather than being hard-coded.",
+        object_kind = "generic_object"
+      ))
+    }
+
+    NULL
+  }
+
+  describe_helper_function <- function(lhs_name, rhs) {
+    rhs <- trim_ws(rhs)
+    if (!grepl("^function\\s*\\(", rhs, perl = TRUE)) {
+      return(NULL)
+    }
+
+    body <- compact_ws(rhs)
+    actions <- character()
+    explanation <- paste0("`", lhs_name, "()` is a reusable helper function defined near the top of the script.")
+    helper_kind <- "generic"
+    reader <- ""
+    object_kind <- "generic_object"
+
+    if (grepl("\\bfile\\.exists\\s*\\(", body, perl = TRUE)) {
+      actions <- c(actions, "check whether the requested file exists")
+    }
+    if (grepl("file\\.info\\([^)]*\\)\\$mtime", body, perl = TRUE) || grepl("\\$mtime\\b", body, perl = TRUE)) {
+      actions <- c(actions, "verify that the file was updated today")
+    }
+    if (grepl("\\bread_excel\\s*\\(", body, perl = TRUE)) {
+      actions <- c(actions, "read the Excel file only if those checks pass")
+      helper_kind <- "dated_excel_reader"
+      reader <- "excel"
+      object_kind <- "data_frame"
+    } else if (grepl("\\bread\\.csv\\s*\\(|\\bread_csv\\s*\\(", body, perl = TRUE)) {
+      actions <- c(actions, "read the CSV file only if those checks pass")
+      helper_kind <- "dated_csv_reader"
+      reader <- "csv"
+      object_kind <- "data_frame"
+    }
+    if (grepl("\\bstop\\s*\\(", body, perl = TRUE)) {
+      actions <- c(actions, "stop the script with a clear error if a check fails")
+    }
+
+    if (length(actions) == 0L) {
+      actions <- "handle a repeated task later in the script"
+    }
+
+    if (helper_kind == "dated_excel_reader") {
+      title <- "Define checked Excel reader"
+      explanation <- paste0(
+        explanation,
+        " It checks whether a file exists, confirms that its modified date is today, and then reads the Excel file. If a check fails, the function stops with an error instead of silently using stale or missing data."
+      )
+    } else if (helper_kind == "dated_csv_reader") {
+      title <- "Define checked CSV reader"
+      explanation <- paste0(
+        explanation,
+        " It checks whether a file exists, confirms that its modified date is today, and then reads the CSV file. If a check fails, the function stops with an error instead of silently using stale or missing data."
+      )
+    } else {
+      title <- "Define helper function"
+    }
+
+    list(
+      title = title,
+      detail = paste0("define `", lhs_name, "` to ", paste(actions, collapse = "; ")),
+      explanation = explanation,
+      helper_kind = helper_kind,
+      reader = reader,
+      object_kind = object_kind
+    )
+  }
+
+  describe_helper_call <- function(text) {
+    fn <- plain_fn(leading_call(text))
+    if (!nzchar(fn)) {
+      return(NULL)
+    }
+
+    helper_info <- helper_functions[[fn]]
+    if (is.null(helper_info)) {
+      return(NULL)
+    }
+
+    args <- call_args(text)
+    path_value <- display_path_value(extract_string_literal(text))
+
+    if (helper_info$helper_kind %in% c("dated_excel_reader", "dated_csv_reader")) {
+      file_label <- switch(
+        helper_info$reader,
+        excel = "Load Excel file",
+        csv = "Load CSV file",
+        "Load data file"
+      )
+      path_detail <- if (!is.null(path_value) && nzchar(path_value)) pretty_path(path_value) else "requested file path"
+      return(list(
+        kind = "input",
+        group = "Inputs",
+        title = file_label,
+        detail = paste0(path_detail, "; confirm it exists and was updated today before reading it"),
+        source = path_value %||% "",
+        target_path = path_value %||% "",
+        explanation = paste0("This load uses `", fn, "()` defined earlier. That helper checks whether the file exists, verifies that it was updated today, and then reads it."),
+        object_kind = "data_frame"
+      ))
+    }
+
+    list(
+      kind = "transform",
+      group = "",
+      title = paste0("Use helper function `", fn, "`"),
+      detail = paste0("run `", fn, "` on ", if (length(args) > 0L) humanize_expression(args[[1]]) else "the supplied input"),
+      source = if (length(args) > 0L) label_from_expr(args[[1]]) else "",
+      target_path = "",
+      explanation = paste0("This step reuses `", fn, "()`, a helper function defined earlier in the script."),
+      object_kind = helper_info$object_kind %||% "generic_object"
+    )
+  }
+
   chart_step_titles <- c("Create chart", "Add chart layer", "Label chart", "Style chart", "Set chart defaults", "Arrange charts")
   prep_step_titles <- c(
     "Convert to data frame", "Add or change columns", "Filter rows", "Keep selected columns",
@@ -462,6 +729,37 @@ ghostwriter_parse_r <- function(path) {
       rhs <- trim_ws(left_hit[4])
       lhs_id <- object_node(lhs_name)
 
+      helper_definition <- describe_helper_function(lhs_name, rhs)
+      if (!is.null(helper_definition)) {
+        lhs_id <- object_node(lhs_name, helper_definition$object_kind)
+        step_id <- add_step_record(
+          kind = "transform",
+          title = helper_definition$title,
+          detail = helper_definition$detail,
+          output = lhs_name,
+          group = "Setup",
+          explanation = helper_definition$explanation
+        )
+        add_edge(step_id, lhs_id, "creates")
+        helper_functions[[lhs_name]] <- helper_definition
+        next
+      }
+
+      setup_info <- describe_setup_assignment(lhs_name, rhs)
+      if (!is.null(setup_info)) {
+        lhs_id <- object_node(lhs_name, setup_info$object_kind)
+        step_id <- add_step_record(
+          kind = "transform",
+          title = setup_info$title,
+          detail = setup_info$detail,
+          output = lhs_name,
+          group = "Setup",
+          explanation = setup_info$explanation
+        )
+        add_edge(step_id, lhs_id, "creates")
+        next
+      }
+
       discovery_info <- describe_file_discovery(rhs)
       if (!is.null(discovery_info)) {
         lhs_id <- object_node(lhs_name, discovery_info$object_kind)
@@ -470,7 +768,8 @@ ghostwriter_parse_r <- function(path) {
           title = discovery_info$title,
           detail = discovery_info$detail,
           output = lhs_name,
-          target_path = discovery_info$path
+          target_path = discovery_info$path,
+          group = "Inputs"
         )
         add_edge(step_id, lhs_id, "creates")
         file_collections[[lhs_name]] <- discovery_info
@@ -549,6 +848,26 @@ ghostwriter_parse_r <- function(path) {
       }
 
       fn <- leading_call(rhs)
+      helper_call <- describe_helper_call(rhs)
+      if (!is.null(helper_call)) {
+        lhs_id <- object_node(lhs_name, helper_call$object_kind)
+        step_id <- add_step_record(
+          kind = helper_call$kind,
+          title = helper_call$title,
+          detail = helper_call$detail,
+          source = helper_call$source,
+          output = lhs_name,
+          target_path = helper_call$target_path,
+          group = helper_call$group,
+          explanation = helper_call$explanation
+        )
+        if (identical(helper_call$kind, "input") && nzchar(helper_call$target_path)) {
+          add_edge(file_node(helper_call$target_path, "input_file"), step_id, "reads")
+        }
+        add_edge(step_id, lhs_id, "creates")
+        next
+      }
+
       if (is_known_call(fn, input_funs, input_funs_base)) {
         info <- describe_input(rhs)
         lhs_id <- object_node(lhs_name, info$object_kind)
@@ -558,7 +877,8 @@ ghostwriter_parse_r <- function(path) {
           detail = info$detail,
           source = info$path %||% "",
           output = lhs_name,
-          target_path = info$path %||% ""
+          target_path = info$path %||% "",
+          group = "Inputs"
         )
         if (!is.null(info$path)) {
           add_edge(file_node(info$path, "input_file"), step_id, "reads")
@@ -609,11 +929,27 @@ ghostwriter_parse_r <- function(path) {
         title = loop_info$title,
         detail = loop_info$detail,
         source = loop_info$source,
-        output = loop_info$output
+        output = loop_info$output,
+        group = "Inputs"
       )
       add_edge(source_id, step_id, "reads")
       add_edge(step_id, output_id, "creates")
       import_lists[[loop_info$output]] <- loop_info
+      next
+    }
+
+    generic_loop_info <- describe_generic_loop(statement)
+    if (!is.null(generic_loop_info)) {
+      source_id <- if (nzchar(generic_loop_info$source)) object_node(generic_loop_info$source, "vector_object") else NULL
+      step_id <- add_step_record(
+        kind = generic_loop_info$kind,
+        title = generic_loop_info$title,
+        detail = generic_loop_info$detail,
+        source = generic_loop_info$source,
+        group = generic_loop_info$group,
+        explanation = "This loop repeats the enclosed block for each file or item in the collection. The report summarizes the repeated pattern here instead of listing every inner line as a separate top-level workflow step."
+      )
+      add_edge(source_id, step_id, "flows")
       next
     }
 
@@ -660,7 +996,30 @@ ghostwriter_parse_r <- function(path) {
     }
 
     fn <- leading_call(statement)
-    if (!is.null(fn) && plain_fn(fn) %in% c("library", "require")) {
+    if (!is.null(fn) && plain_fn(fn) %in% c("library", "require", "requireNamespace")) {
+      next
+    }
+
+    if (!is.null(fn) && plain_fn(fn) %in% c("suppressPackageStartupMessages", "suppressMessages", "suppressWarnings", "suppressStartupMessages")) {
+      wrapped_args <- call_args(statement)
+      wrapped_fn <- if (length(wrapped_args) > 0L) plain_fn(leading_call(wrapped_args[[1]])) else ""
+      if (wrapped_fn %in% c("library", "require", "requireNamespace")) {
+        next
+      }
+    }
+
+    if (!is.null(fn) && plain_fn(fn) == "rm" && grepl("list\\s*=\\s*ls\\s*\\(", statement, perl = TRUE)) {
+      step_id <- add_step_record(
+        kind = "transform",
+        title = "Clear workspace",
+        detail = "remove existing objects from memory before starting the workflow",
+        group = "Setup",
+        explanation = "This housekeeping step clears previously loaded objects so the script starts from a clean R session."
+      )
+      next
+    }
+
+    if (!is.null(fn) && plain_fn(fn) == "gc") {
       next
     }
 
@@ -675,7 +1034,8 @@ ghostwriter_parse_r <- function(path) {
         detail = info$detail,
         source = source_label,
         output = info$path %||% "",
-        target_path = info$path %||% ""
+        target_path = info$path %||% "",
+        group = "Outputs"
       )
       add_edge(source_info$node_id, step_id, "writes")
       if (!is.null(info$path)) {
@@ -756,7 +1116,7 @@ r_object_kind_from_input <- function(fn) {
     return("data_frame")
   }
 
-  if (fn %in% c("readRDS")) {
+  if (fn %in% c("readRDS", "load", "data")) {
     return("generic_object")
   }
 
