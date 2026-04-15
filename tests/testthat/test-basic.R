@@ -172,6 +172,62 @@ test_that("R parser recognizes discovered JSON files and list-based imports", {
   expect_equal(stats$inputs, 1)
 })
 
+test_that("R parser preserves setup steps before dated helper-based file loads", {
+  tmp <- tempfile(fileext = ".R")
+  writeLines(c(
+    'folder <- "A:/EXAMPLE/RAA/PS Scheduled Queries"',
+    'today <- Sys.Date()',
+    'check_and_read <- function(file_path) {',
+    '  if (file.exists(file_path)) {',
+    '    if (as.Date(file.info(file_path)$mtime) == today) {',
+    '      return(readxl::read_excel(file_path))',
+    '    } else {',
+    '      stop(paste("File exists but was not updated today:", basename(file_path)))',
+    '    }',
+    '  } else {',
+    '    stop(paste("File not found:", basename(file_path)))',
+    '  }',
+    '}',
+    'ACTFYBAL_Table <- check_and_read(file.path(folder, "UTGL_PROJ_ACT_FY_BAL.xlsx"))',
+    'direct91_Table <- readxl::read_excel("A:/EXAMPLE/Grants AR/AR Reconciliation Template/direct.xlsx", sheet = "UT_GM_NBP_PAYMENTS", skip = 1)'
+  ), tmp)
+
+  parsed <- ghostwriteR:::ghostwriter_parse(tmp)
+  steps <- parsed$steps
+  groups <- ghostwriteR:::workflow_timeline_groups(steps)
+
+  expect_equal(
+    steps$title[seq_len(5)],
+    c("Set folder path", "Set runtime date", "Define checked Excel reader", "Load Excel file", "Load Excel file")
+  )
+  expect_equal(steps$group[seq_len(5)], c("Setup", "Setup", "Setup", "Inputs", "Inputs"))
+  expect_match(steps$detail[[3]], "updated today", fixed = TRUE)
+  expect_match(steps$explanation[[3]], "reusable helper function", fixed = TRUE)
+  expect_match(steps$detail[[4]], "updated today", fixed = TRUE)
+  expect_match(steps$explanation[[4]], "defined earlier", fixed = TRUE)
+  expect_equal(names(groups)[1:2], c("Setup", "Inputs"))
+})
+
+test_that("R parser summarizes generic loops instead of emitting raw `for` calls", {
+  tmp <- tempfile(fileext = ".R")
+  writeLines(c(
+    'files <- list.files("data", pattern = "sample", full.names = TRUE)',
+    'for (f in files) {',
+    '  sid <- basename(f)',
+    '  obj <- Load10X_Spatial(data.dir = dirname(f), filename = "filtered_feature_bc_matrix.h5", slice = sid)',
+    '  save(obj, file = file.path("out", paste0(sid, ".RData")))',
+    '}'
+  ), tmp)
+
+  parsed <- ghostwriteR:::ghostwriter_parse(tmp)
+  loop_step <- parsed$steps[parsed$steps$title == "Repeat sample workflow for each file", , drop = FALSE]
+
+  expect_equal(nrow(loop_step), 1)
+  expect_match(loop_step$detail[[1]], "once for each file referenced by `files`", fixed = TRUE)
+  expect_match(loop_step$detail[[1]], "load one spatial sample", fixed = TRUE)
+  expect_match(loop_step$detail[[1]], "save output for each iteration", fixed = TRUE)
+})
+
 test_that("R parser handles magrittr pipes and older tidyverse verbs cleanly", {
   tmp <- tempfile(fileext = ".R")
   writeLines(c(

@@ -36,7 +36,16 @@ build_html_page <- function(parsed, svg_text) {
     }, character(1)), collapse = "\n")
   }
 
-  graph_markup <- paste0('<div class="graph-frame" id="graphFrame">', svg_text, '</div>')
+  graph_markup <- paste0(
+    '<div class="graph-toolbar" role="toolbar" aria-label="Graph zoom controls">',
+    '<button class="graph-tool" type="button" id="graphZoomOutButton" aria-label="Zoom out">-</button>',
+    '<button class="graph-tool" type="button" id="graphZoomInButton" aria-label="Zoom in">+</button>',
+    '<button class="graph-tool graph-tool--wide" type="button" id="graphFitButton">Fit</button>',
+    '<button class="graph-tool graph-tool--wide" type="button" id="graphActualButton">100%</button>',
+    '<span class="graph-zoom-label" id="graphZoomLabel">100%</span>',
+    '</div>',
+    '<div class="graph-frame" id="graphFrame"><div class="graph-canvas">', svg_text, '</div></div>'
+  )
 
   timeline_copy <- if (isTRUE(config$large)) {
     "This script is large, so each phase opens in a shortened view first. Use the phase controls to reveal additional steps only when you need them."
@@ -121,7 +130,6 @@ build_html_page <- function(parsed, svg_text) {
   )
 }
 
-
 build_html_graph_page <- function(parsed, svg_text) {
   stats <- workflow_stats(parsed)
   steps <- parsed$steps
@@ -131,6 +139,16 @@ build_html_graph_page <- function(parsed, svg_text) {
   timeline_groups <- workflow_timeline_groups(steps)
   overview_groups <- workflow_overview_groups(steps, phase_groups, timeline_groups)
   config <- workflow_display_config(steps, phase_groups)
+
+  graph_toolbar <- paste0(
+    '<div class="graph-toolbar" role="toolbar" aria-label="Graph zoom controls">',
+    '<button class="graph-tool" type="button" id="graphOnlyZoomOutButton" aria-label="Zoom out">-</button>',
+    '<button class="graph-tool" type="button" id="graphOnlyZoomInButton" aria-label="Zoom in">+</button>',
+    '<button class="graph-tool graph-tool--wide" type="button" id="graphOnlyFitButton">Fit</button>',
+    '<button class="graph-tool graph-tool--wide" type="button" id="graphOnlyActualButton">100%</button>',
+    '<span class="graph-zoom-label" id="graphOnlyZoomLabel">100%</span>',
+    '</div>'
+  )
 
   graph_markup <- if (isTRUE(config$graph_overview)) {
     paste0(
@@ -144,14 +162,15 @@ build_html_graph_page <- function(parsed, svg_text) {
       build_phase_overview(overview_groups, steps),
       '</section>',
       '<section class="graph-subview" data-graph-view="full">',
-      '<div class="graph-frame graph-frame--only" id="graphOnlyFrame">',
+      graph_toolbar,
+      '<div class="graph-frame graph-frame--only" id="graphOnlyFrame"><div class="graph-canvas">',
       svg_text,
-      '</div>',
+      '</div></div>',
       '</section>',
       '</div>'
     )
   } else {
-    paste0('<div class="graph-frame graph-frame--only" id="graphOnlyFrame">', svg_text, '</div>')
+    paste0(graph_toolbar, '<div class="graph-frame graph-frame--only" id="graphOnlyFrame"><div class="graph-canvas">', svg_text, '</div></div>')
   }
 
   paste0(
@@ -187,7 +206,6 @@ build_html_graph_page <- function(parsed, svg_text) {
     '</html>\n'
   )
 }
-
 
 html_graph_page_css <- function() {
   paste(c(
@@ -259,6 +277,34 @@ html_graph_page_css <- function() {
     '.graph-panel--only {',
     '  padding: 22px;',
     '}',
+    '.graph-toolbar {',
+    '  display: flex;',
+    '  flex-wrap: wrap;',
+    '  align-items: center;',
+    '  gap: 10px;',
+    '  margin-bottom: 14px;',
+    '}',
+    '.graph-tool {',
+    '  border: 1px solid rgba(35, 75, 104, 0.14);',
+    '  border-radius: 999px;',
+    '  min-width: 42px;',
+    '  padding: 10px 14px;',
+    '  background: white;',
+    '  color: #1f425c;',
+    '  font-weight: 800;',
+    '  cursor: pointer;',
+    '}',
+    '.graph-tool--wide {',
+    '  min-width: 64px;',
+    '}',
+    '.graph-zoom-label {',
+    '  margin-left: auto;',
+    '  border-radius: 999px;',
+    '  padding: 8px 12px;',
+    '  background: rgba(35, 75, 104, 0.08);',
+    '  color: #1f425c;',
+    '  font-weight: 700;',
+    '}',
     '.graph-panel__copy {',
     '  color: var(--muted);',
     '  line-height: 1.6;',
@@ -272,8 +318,13 @@ html_graph_page_css <- function() {
     '  border: 1px solid rgba(35, 75, 104, 0.10);',
     '  padding: 18px;',
     '}',
+    '.graph-canvas {',
+    '  width: max-content;',
+    '  min-width: 100%;',
+    '}',
     '.graph-frame--only svg {',
-    '  width: 100% !important;',
+    '  width: auto !important;',
+    '  max-width: none !important;',
     '  height: auto !important;',
     '  display: block;',
     '}',
@@ -353,6 +404,47 @@ html_graph_page_js <- function() {
     '  var resetButton = document.getElementById("graphOnlyResetButton");',
     '  var graphViewButtons = Array.prototype.slice.call(document.querySelectorAll("[data-graph-view-target]"));',
     '  var graphViewPanels = Array.prototype.slice.call(document.querySelectorAll(".graph-subview"));',
+    '  function setupGraphZoom(frame, options) {',
+    '    if (!frame) return null;',
+    '    var svg = frame.querySelector("svg");',
+    '    if (!svg) return null;',
+    '    var label = options && options.label ? document.getElementById(options.label) : null;',
+    '    var width = 0;',
+    '    if (svg.viewBox && svg.viewBox.baseVal && svg.viewBox.baseVal.width) width = svg.viewBox.baseVal.width;',
+    '    if (!width) width = parseFloat(svg.getAttribute("width")) || svg.getBoundingClientRect().width || 1200;',
+    '    var baseWidth = width;',
+    '    var state = { scale: 1 };',
+    '    function updateLabel() { if (label) label.textContent = Math.round(state.scale * 100) + "%"; }',
+    '    function applyScale(scale) {',
+    '      state.scale = Math.max(0.35, Math.min(scale, 2.5));',
+    '      svg.style.width = (baseWidth * state.scale) + "px";',
+    '      updateLabel();',
+    '    }',
+    '    function fit() {',
+    '      var available = Math.max(frame.clientWidth - 36, 320);',
+    '      applyScale(available / baseWidth);',
+    '      frame.scrollTo({ top: 0, left: 0, behavior: "smooth" });',
+    '    }',
+    '    applyScale(1);',
+    '    if (options && options.fit !== false) fit();',
+    '    return {',
+    '      zoomIn: function() { applyScale(state.scale * 1.2); },',
+    '      zoomOut: function() { applyScale(state.scale / 1.2); },',
+    '      actual: function() { applyScale(1); frame.scrollTo({ top: 0, left: 0, behavior: "smooth" }); },',
+    '      fit: fit',
+    '    };',
+    '  }',
+    '  function bindToolbar(controller, ids) {',
+    '    if (!controller) return;',
+    '    var out = document.getElementById(ids.out);',
+    '    var inn = document.getElementById(ids.inn);',
+    '    var fit = document.getElementById(ids.fit);',
+    '    var actual = document.getElementById(ids.actual);',
+    '    if (out) out.addEventListener("click", controller.zoomOut);',
+    '    if (inn) inn.addEventListener("click", controller.zoomIn);',
+    '    if (fit) fit.addEventListener("click", controller.fit);',
+    '    if (actual) actual.addEventListener("click", controller.actual);',
+    '  }',
     '  function setGraphView(viewName) {',
     '    graphViewButtons.forEach(function(button) {',
     '      var active = button.getAttribute("data-graph-view-target") === viewName;',
@@ -363,23 +455,21 @@ html_graph_page_js <- function() {
     '      panel.classList.toggle("is-visible", panel.getAttribute("data-graph-view") === viewName);',
     '    });',
     '  }',
-    '  if (resetButton && graphFrame) {',
-    '    resetButton.addEventListener("click", function() {',
-    '      graphFrame.scrollTo({ top: 0, left: 0, behavior: "smooth" });',
-    '    });',
+    '  var zoomController = setupGraphZoom(graphFrame, { label: "graphOnlyZoomLabel" });',
+    '  bindToolbar(zoomController, { out: "graphOnlyZoomOutButton", inn: "graphOnlyZoomInButton", fit: "graphOnlyFitButton", actual: "graphOnlyActualButton" });',
+    '  if (resetButton && zoomController) {',
+    '    resetButton.addEventListener("click", function() { zoomController.fit(); });',
     '  }',
     '  graphViewButtons.forEach(function(button) {',
     '    button.addEventListener("click", function() {',
     '      setGraphView(button.getAttribute("data-graph-view-target"));',
+    '      if (button.getAttribute("data-graph-view-target") === "full" && zoomController) zoomController.fit();',
     '    });',
     '  });',
-    '  if (graphViewButtons.length > 0) {',
-    '    setGraphView("overview");',
-    '  }',
+    '  if (graphViewButtons.length > 0) setGraphView("overview");',
     '})();'
   ), collapse = "\n")
 }
-
 
 workflow_stats <- function(parsed) {
   steps <- parsed$steps
@@ -519,6 +609,10 @@ step_phase_label <- function(step_row) {
   step <- unclass(step_row[1, , drop = TRUE])
   text <- tolower(paste(step$title, step$detail, step$narrative, sep = " "))
 
+  if (grepl("clear workspace|set folder path|set output path|set file path|set runtime date|set runtime timestamp|define helper function|define checked .* reader|define date cutoff|build file path|create reference vector", text, perl = TRUE)) {
+    return("Setup")
+  }
+
   if (identical(step$kind, "input")) {
     return("Inputs")
   }
@@ -583,7 +677,7 @@ step_phase_label <- function(step_row) {
 
 
 phase_rank <- function(phase) {
-  order_map <- c("Inputs", "Cleaning", "Feature engineering", "Joins", "Aggregation", "Modeling", "Scoring", "Visualization", "Analysis", "Preparation", "Outputs")
+  order_map <- c("Setup", "Inputs", "Cleaning", "Feature engineering", "Joins", "Aggregation", "Modeling", "Scoring", "Visualization", "Analysis", "Preparation", "Outputs")
   match_value <- match(phase, order_map)
   if (is.na(match_value)) 999L else match_value
 }
@@ -591,6 +685,7 @@ phase_rank <- function(phase) {
 
 phase_caption <- function(phase, count) {
   descriptions <- c(
+    Setup = "Folder paths, runtime dates, helper functions, and other values the script defines before main processing begins.",
     Inputs = "Files or data sources loaded into the workflow.",
     Cleaning = "Filtering, reshaping, sorting, or cleanup before analysis.",
     "Feature engineering" = "New columns, flags, buckets, or business rules added to the data.",
@@ -707,8 +802,9 @@ build_timeline_step_button <- function(step_row, active = FALSE, hidden = FALSE)
     ' data-step="', step$step,
     '" data-kind="', html_escape(step$kind),
     '" data-phase="', html_escape(phase),
-    '" data-title="', html_escape(step$title),
     '" data-narrative="', html_escape(step$narrative),
+    '" data-title="', html_escape(step$title),
+    '" data-summary="', html_escape(detail_summary_text(step_row)),
     '" data-detail="', html_escape(step$detail),
     '" data-source="', html_escape(step$source),
     '" data-output="', html_escape(step$output),
@@ -730,7 +826,6 @@ build_timeline_step_button <- function(step_row, active = FALSE, hidden = FALSE)
     '</button>'
   )
 }
-
 
 build_timeline_inventory_meta <- function(step_row) {
   step <- unclass(step_row[1, , drop = TRUE])
@@ -757,8 +852,9 @@ build_html_detail_panel <- function(steps) {
     return('<aside class="panel detail-panel"><div class="detail-empty">No workflow steps were detected.</div></aside>')
   }
 
-  step <- unclass(steps[1, , drop = TRUE])
-  phase <- step_phase_label(steps[1, , drop = FALSE])
+  step_row <- steps[1, , drop = FALSE]
+  step <- unclass(step_row[1, , drop = TRUE])
+  phase <- step_phase_label(step_row)
   paste0(
     '<aside class="panel detail-panel">',
     '<div class="detail-sticky">',
@@ -768,7 +864,7 @@ build_html_detail_panel <- function(steps) {
     '<span class="detail-chip detail-chip--muted" id="detailKind">', html_escape(step$kind), '</span>',
     '</div>',
     '<h2 id="detailTitle">', html_escape(step$title), '</h2>',
-    '<p class="detail-narrative" id="detailNarrative">', html_escape(step$narrative), '</p>',
+    '<p class="detail-narrative" id="detailNarrative">', html_escape(detail_summary_text(step_row)), '</p>',
     '<div class="detail-callout" id="detailCallout">', build_detail_callout_markup(step$detail), '</div>',
     '<div class="detail-explanation" id="detailExplanationBlock">', build_detail_explanation_markup(step$explanation), '</div>',
     '<details class="detail-code" id="detailCodeBlock">',
@@ -776,19 +872,85 @@ build_html_detail_panel <- function(steps) {
     '<pre><code id="detailCode">', html_escape(step$code), '</code></pre>',
     '</details>',
     '<dl class="detail-meta">',
-    build_detail_meta_row('Source', step$source, 'detailSource'),
+    build_detail_meta_row('Source', step$source, 'detailSource', mode = 'comma'),
     build_detail_meta_row('Output', step$output, 'detailOutput'),
     build_detail_meta_row('Saved to', step$target_path, 'detailTarget'),
     build_detail_meta_row('Replaced later', if (nzchar(step$superseded_by)) paste0("Step ", step$superseded_by) else "", 'detailSuperseded'),
-    build_detail_meta_row('Input columns used', step$input_columns, 'detailInputColumns'),
-    build_detail_meta_row('Output columns produced', step$output_columns, 'detailOutputColumns'),
-    build_detail_meta_row('Columns carried through', step$carried_columns, 'detailCarriedColumns'),
-    build_detail_meta_row('Columns newly created or changed', step$created_columns, 'detailCreatedColumns'),
+    build_detail_meta_row('Input columns used', step$input_columns, 'detailInputColumns', mode = 'comma'),
+    build_detail_meta_row('Output columns produced', step$output_columns, 'detailOutputColumns', mode = 'comma'),
+    build_detail_meta_row('Columns carried through', step$carried_columns, 'detailCarriedColumns', mode = 'comma'),
+    build_detail_meta_row('Columns newly created or changed', step$created_columns, 'detailCreatedColumns', mode = 'comma'),
     '</dl>',
     '<p class="detail-help">Use the timeline on the left to move through the workflow. Keep the full graph for technical review only.</p>',
     '</div>',
     '</aside>'
   )
+}
+
+
+detail_summary_text <- function(step_row) {
+  step <- unclass(step_row[1, , drop = TRUE])
+  summary <- build_step_narrative(step$kind, step$title, "", step$source, step$output, step$target_path)
+  summary <- compact_ws(summary)
+  if (!nzchar(summary)) {
+    summary <- step$title
+  }
+  summary
+}
+
+
+split_display_items <- function(text, mode = c("text", "comma", "semicolon", "newline")) {
+  mode <- match.arg(mode)
+  text <- trim_ws(text)
+  if (!nzchar(text)) {
+    return(character())
+  }
+
+  items <- switch(
+    mode,
+    text = text,
+    comma = split_top_level(text, ","),
+    semicolon = unlist(strsplit(text, ";", fixed = TRUE), use.names = FALSE),
+    newline = unlist(strsplit(text, "\n", fixed = TRUE), use.names = FALSE)
+  )
+
+  items <- trim_ws(items)
+  items[nzchar(items)]
+}
+
+build_expandable_value_markup <- function(value, mode = c("text", "comma", "semicolon", "newline"), ordered = FALSE, visible = 8L, item_class = "detail-meta__list") {
+  mode <- match.arg(mode)
+  value <- trim_ws(value)
+  if (!nzchar(value)) {
+    return("")
+  }
+
+  if (identical(mode, "text")) {
+    return(paste0('<p class="detail-meta__text">', html_escape(value), '</p>'))
+  }
+
+  items <- split_display_items(value, mode)
+  if (length(items) <= 1L) {
+    return(paste0('<p class="detail-meta__text">', html_escape(value), '</p>'))
+  }
+
+  list_tag <- if (isTRUE(ordered)) "ol" else "ul"
+  visible_n <- min(length(items), visible)
+  visible_items <- paste0('<li>', html_escape(items[seq_len(visible_n)]), '</li>', collapse = "")
+  markup <- paste0('<', list_tag, ' class="', item_class, '">', visible_items, '</', list_tag, '>')
+
+  if (length(items) > visible_n) {
+    hidden_items <- paste0('<li>', html_escape(items[(visible_n + 1L):length(items)]), '</li>', collapse = "")
+    markup <- paste0(
+      markup,
+      '<details class="detail-more">',
+      '<summary>Show ', length(items) - visible_n, ' more item', plural_suffix(length(items) - visible_n), '</summary>',
+      '<', list_tag, ' class="', item_class, ' detail-more__list">', hidden_items, '</', list_tag, '>',
+      '</details>'
+    )
+  }
+
+  markup
 }
 
 
@@ -798,15 +960,7 @@ build_detail_callout_markup <- function(detail) {
     return('<p class="detail-callout__text">No extra detail for this step.</p>')
   }
 
-  parts <- trim_ws(unlist(strsplit(detail, ";", fixed = TRUE), use.names = FALSE))
-  parts <- parts[nzchar(parts)]
-
-  if (length(parts) <= 1L) {
-    return(paste0('<p class="detail-callout__text">', html_escape(detail), '</p>'))
-  }
-
-  items <- paste0('<li>', html_escape(parts), '</li>', collapse = "")
-  paste0('<ol class="detail-list">', items, '</ol>')
+  build_expandable_value_markup(detail, mode = "semicolon", ordered = TRUE, visible = 8L, item_class = "detail-list")
 }
 
 
@@ -816,14 +970,7 @@ build_detail_explanation_markup <- function(explanation) {
     return('<p class="detail-explanation__text">No explanation notes for this step.</p>')
   }
 
-  parts <- trim_ws(unlist(strsplit(explanation, "\n", fixed = TRUE), use.names = FALSE))
-  parts <- parts[nzchar(parts)]
-  if (length(parts) <= 1L) {
-    return(paste0('<p class="detail-explanation__text">', html_escape(explanation), '</p>'))
-  }
-
-  items <- paste0('<li>', html_escape(parts), '</li>', collapse = "")
-  paste0('<ul class="detail-explanation__list">', items, '</ul>')
+  build_expandable_value_markup(explanation, mode = "newline", ordered = FALSE, visible = 6L, item_class = "detail-explanation__list")
 }
 
 
@@ -915,22 +1062,23 @@ build_inventory_card <- function(step_row, mode = c("named", "step")) {
     '<p class="inventory-card__meta">', html_escape(meta), '</p>',
     if (nzchar(count_line)) paste0('<p class="inventory-card__counts">', html_escape(count_line), '</p>') else '',
     '<dl class="inventory-card__details">',
-    build_detail_meta_row('Input columns used', step$input_columns, paste0(id_prefix, 'Input', step$step)),
-    build_detail_meta_row('Output columns produced', step$output_columns, paste0(id_prefix, 'Output', step$step)),
-    build_detail_meta_row('Columns carried through', step$carried_columns, paste0(id_prefix, 'Carried', step$step)),
-    build_detail_meta_row('Columns newly created or changed', step$created_columns, paste0(id_prefix, 'Created', step$step)),
+    build_detail_meta_row('Input columns used', step$input_columns, paste0(id_prefix, 'Input', step$step), mode = 'comma'),
+    build_detail_meta_row('Output columns produced', step$output_columns, paste0(id_prefix, 'Output', step$step), mode = 'comma'),
+    build_detail_meta_row('Columns carried through', step$carried_columns, paste0(id_prefix, 'Carried', step$step), mode = 'comma'),
+    build_detail_meta_row('Columns newly created or changed', step$created_columns, paste0(id_prefix, 'Created', step$step), mode = 'comma'),
     '</dl>',
     '</article>'
   )
 }
 
 
-build_detail_meta_row <- function(label, value, id) {
+build_detail_meta_row <- function(label, value, id, mode = c("text", "comma", "semicolon", "newline")) {
+  mode <- match.arg(mode)
   display_style <- if (nzchar(value)) '' else ' style="display:none;"'
   paste0(
     '<div class="detail-meta__row" id="', id, 'Row"', display_style, '>',
     '<dt>', html_escape(label), '</dt>',
-    '<dd id="', id, '">', html_escape(value), '</dd>',
+    '<dd id="', id, '">', build_expandable_value_markup(value, mode = mode, ordered = FALSE, visible = 8L), '</dd>',
     '</div>'
   )
 }
@@ -1247,6 +1395,7 @@ html_page_css <- function() {
     '  color: var(--ink);',
     '  line-height: 1.7;',
     '  font-size: 1rem;',
+    '  font-weight: 600;',
     '}',
     '.detail-callout {',
     '  padding: 14px 16px;',
@@ -1266,6 +1415,17 @@ html_page_css <- function() {
     '}',
     '.detail-list li {',
     '  padding-left: 0.1rem;',
+    '}',
+    '.detail-more {',
+    '  margin-top: 10px;',
+    '}',
+    '.detail-more summary {',
+    '  cursor: pointer;',
+    '  color: #1f425c;',
+    '  font-weight: 700;',
+    '}',
+    '.detail-more__list {',
+    '  margin-top: 10px;',
     '}',
     '.detail-explanation {',
     '  padding: 14px 16px;',
@@ -1341,6 +1501,19 @@ html_page_css <- function() {
     '  font-weight: 600;',
     '  word-break: break-word;',
     '}',
+    '.detail-meta__text {',
+    '  margin: 0;',
+    '  font-weight: 600;',
+    '  line-height: 1.6;',
+    '}',
+    '.detail-meta__list {',
+    '  margin: 0;',
+    '  padding-left: 1.2rem;',
+    '  display: grid;',
+    '  gap: 0.35rem;',
+    '  line-height: 1.55;',
+    '  font-weight: 600;',
+    '}',
     '.detail-help {',
     '  margin: 0;',
     '  color: var(--muted);',
@@ -1411,6 +1584,34 @@ html_page_css <- function() {
     '  gap: 10px;',
     '}',
     '.graph-panel { min-height: 78vh; }',
+    '.graph-toolbar {',
+    '  display: flex;',
+    '  flex-wrap: wrap;',
+    '  align-items: center;',
+    '  gap: 10px;',
+    '  margin: 16px 0 12px;',
+    '}',
+    '.graph-tool {',
+    '  border: 1px solid rgba(35, 75, 104, 0.14);',
+    '  border-radius: 999px;',
+    '  min-width: 42px;',
+    '  padding: 10px 14px;',
+    '  background: white;',
+    '  color: #1f425c;',
+    '  font-weight: 800;',
+    '  cursor: pointer;',
+    '}',
+    '.graph-tool--wide {',
+    '  min-width: 64px;',
+    '}',
+    '.graph-zoom-label {',
+    '  margin-left: auto;',
+    '  border-radius: 999px;',
+    '  padding: 8px 12px;',
+    '  background: rgba(35, 75, 104, 0.08);',
+    '  color: #1f425c;',
+    '  font-weight: 700;',
+    '}',
     '.focus-button {',
       '  border: none;',
       '  border-radius: 999px;',
@@ -1435,8 +1636,13 @@ html_page_css <- function() {
     '  border: 1px solid rgba(35, 75, 104, 0.10);',
     '  padding: 18px;',
     '}',
+    '.graph-canvas {',
+    '  width: max-content;',
+    '  min-width: 100%;',
+    '}',
     '.graph-frame svg {',
-    '  width: 100% !important;',
+    '  width: auto !important;',
+    '  max-width: none !important;',
       '  height: auto !important;',
       '  display: block;',
     '}',
@@ -1488,6 +1694,7 @@ html_page_css <- function() {
     '  .stat-grid { grid-template-columns: 1fr 1fr; }',
     '  .mode-toggle { width: 100%; }',
     '  .mode-button { flex: 1 1 auto; }',
+    '  .graph-zoom-label { margin-left: 0; }',
     '  .phase-group summary { display: block; }',
     '  .phase-meta { display: block; text-align: left; margin-top: 4px; }',
     '}',
@@ -1505,8 +1712,8 @@ html_page_js <- function() {
     '  var stepButtons = Array.prototype.slice.call(document.querySelectorAll(".timeline-step"));',
     '  var phaseExpandButtons = Array.prototype.slice.call(document.querySelectorAll("[data-phase-expand]"));',
     '  var detailMap = {',
-      '    phase: document.getElementById("detailPhase"),',
-      '    kind: document.getElementById("detailKind"),',
+    '    phase: document.getElementById("detailPhase"),',
+    '    kind: document.getElementById("detailKind"),',
     '    title: document.getElementById("detailTitle"),',
     '    narrative: document.getElementById("detailNarrative"),',
     '    callout: document.getElementById("detailCallout"),',
@@ -1530,25 +1737,56 @@ html_page_js <- function() {
     '    createdColumnsRow: document.getElementById("detailCreatedColumnsRow"),',
     '    createdColumns: document.getElementById("detailCreatedColumns")',
     '  };',
+    '  function setupGraphZoom(frame, options) {',
+    '    if (!frame) return null;',
+    '    var svg = frame.querySelector("svg");',
+    '    if (!svg) return null;',
+    '    var label = options && options.label ? document.getElementById(options.label) : null;',
+    '    var width = 0;',
+    '    if (svg.viewBox && svg.viewBox.baseVal && svg.viewBox.baseVal.width) width = svg.viewBox.baseVal.width;',
+    '    if (!width) width = parseFloat(svg.getAttribute("width")) || svg.getBoundingClientRect().width || 1200;',
+    '    var baseWidth = width;',
+    '    var state = { scale: 1 };',
+    '    function updateLabel() { if (label) label.textContent = Math.round(state.scale * 100) + "%"; }',
+    '    function applyScale(scale) {',
+    '      state.scale = Math.max(0.35, Math.min(scale, 2.5));',
+    '      svg.style.width = (baseWidth * state.scale) + "px";',
+    '      updateLabel();',
+    '    }',
+    '    function fit() {',
+    '      var available = Math.max(frame.clientWidth - 36, 320);',
+    '      applyScale(available / baseWidth);',
+    '      frame.scrollTo({ top: 0, left: 0, behavior: "smooth" });',
+    '    }',
+    '    applyScale(1);',
+    '    if (options && options.fit !== false) fit();',
+    '    return {',
+    '      zoomIn: function() { applyScale(state.scale * 1.2); },',
+    '      zoomOut: function() { applyScale(state.scale / 1.2); },',
+    '      actual: function() { applyScale(1); frame.scrollTo({ top: 0, left: 0, behavior: "smooth" }); },',
+    '      fit: fit',
+    '    };',
+    '  }',
+    '  function bindToolbar(controller, ids) {',
+    '    if (!controller) return;',
+    '    var out = document.getElementById(ids.out);',
+    '    var inn = document.getElementById(ids.inn);',
+    '    var fit = document.getElementById(ids.fit);',
+    '    var actual = document.getElementById(ids.actual);',
+    '    if (out) out.addEventListener("click", controller.zoomOut);',
+    '    if (inn) inn.addEventListener("click", controller.zoomIn);',
+    '    if (fit) fit.addEventListener("click", controller.fit);',
+    '    if (actual) actual.addEventListener("click", controller.actual);',
+    '  }',
     '  function setView(viewName) {',
     '    viewButtons.forEach(function(button) {',
     '      var active = button.getAttribute("data-view-target") === viewName;',
     '      button.classList.toggle("is-active", active);',
     '      button.setAttribute("aria-pressed", active ? "true" : "false");',
     '    });',
-      '    viewPanels.forEach(function(panel) {',
-        '      panel.classList.toggle("is-visible", panel.getAttribute("data-view") === viewName);',
-      '    });',
-    '  }',
-    '  function setMeta(rowNode, valueNode, value) {',
-      '    if (!rowNode || !valueNode) return;',
-      '    if (value) {',
-    '      rowNode.style.display = "grid";',
-      '      valueNode.textContent = value;',
-    '    } else {',
-    '      rowNode.style.display = "none";',
-      '      valueNode.textContent = "";',
-    '    }',
+    '    viewPanels.forEach(function(panel) {',
+    '      panel.classList.toggle("is-visible", panel.getAttribute("data-view") === viewName);',
+    '    });',
     '  }',
     '  function clearNode(node) {',
     '    if (!node) return;',
@@ -1560,15 +1798,65 @@ html_page_js <- function() {
     '    p.textContent = text;',
     '    containerNode.appendChild(p);',
     '  }',
-    '  function appendList(containerNode, tagName, className, parts) {',
-    '    var list = document.createElement(tagName);',
+    '  function splitTopLevel(text, delimiter) {',
+    '    var parts = [];',
+    '    var current = "";',
+    '    var depth = 0;',
+    '    var quote = "";',
+    '    for (var i = 0; i < text.length; i += 1) {',
+    '      var ch = text.charAt(i);',
+    '      if (quote) {',
+    '        current += ch;',
+    '        if (ch === quote && text.charAt(i - 1) !== "\\\\") quote = "";',
+    '        continue;',
+    '      }',
+    '      if (ch === "\"" || ch === "\'" || ch === "`") { quote = ch; current += ch; continue; }',
+    '      if (ch === "(" || ch === "[") { depth += 1; current += ch; continue; }',
+    '      if ((ch === ")" || ch === "]") && depth > 0) { depth -= 1; current += ch; continue; }',
+    '      if (ch === delimiter && depth === 0) { parts.push(current.trim()); current = ""; continue; }',
+    '      current += ch;',
+    '    }',
+    '    if (current.trim()) parts.push(current.trim());',
+    '    return parts.filter(Boolean);',
+    '  }',
+    '  function parseItems(text, mode) {',
+    '    var value = (text || "").trim();',
+    '    if (!value) return [];',
+    '    if (mode === "semicolon") return value.split(";").map(function(part) { return part.trim(); }).filter(Boolean);',
+    '    if (mode === "newline") return value.split(/\n+/).map(function(part) { return part.trim(); }).filter(Boolean);',
+    '    if (mode === "comma") return splitTopLevel(value, ",");',
+    '    return [value];',
+    '  }',
+    '  function appendExpandableList(containerNode, items, options) {',
+    '    var opts = options || {};',
+    '    var listTag = opts.ordered ? "ol" : "ul";',
+    '    var className = opts.className || "detail-meta__list";',
+    '    var visible = Math.min(items.length, opts.visible || 8);',
+    '    var list = document.createElement(listTag);',
     '    list.className = className;',
-    '    parts.forEach(function(part) {',
+    '    items.slice(0, visible).forEach(function(item) {',
     '      var li = document.createElement("li");',
-    '      li.textContent = part;',
+    '      li.textContent = item;',
     '      list.appendChild(li);',
     '    });',
     '    containerNode.appendChild(list);',
+    '    if (items.length > visible) {',
+    '      var details = document.createElement("details");',
+    '      details.className = "detail-more";',
+    '      var summary = document.createElement("summary");',
+    '      var hiddenCount = items.length - visible;',
+    '      summary.textContent = "Show " + hiddenCount + " more item" + (hiddenCount === 1 ? "" : "s");',
+    '      details.appendChild(summary);',
+    '      var hiddenList = document.createElement(listTag);',
+    '      hiddenList.className = className + " detail-more__list";',
+    '      items.slice(visible).forEach(function(item) {',
+    '        var li = document.createElement("li");',
+    '        li.textContent = item;',
+    '        hiddenList.appendChild(li);',
+    '      });',
+    '      details.appendChild(hiddenList);',
+    '      containerNode.appendChild(details);',
+    '    }',
     '  }',
     '  function renderDetailCallout(detail, containerNode) {',
     '    if (!containerNode) return;',
@@ -1578,12 +1866,12 @@ html_page_js <- function() {
     '      appendParagraph(containerNode, "detail-callout__text", "No extra detail for this step.");',
     '      return;',
     '    }',
-    '    var parts = text.split(";").map(function(part) { return part.trim(); }).filter(Boolean);',
+    '    var parts = parseItems(text, "semicolon");',
     '    if (parts.length <= 1) {',
     '      appendParagraph(containerNode, "detail-callout__text", text);',
     '      return;',
     '    }',
-    '    appendList(containerNode, "ol", "detail-list", parts);',
+    '    appendExpandableList(containerNode, parts, { ordered: true, className: "detail-list", visible: 8 });',
     '  }',
     '  function renderDetailExplanation(explanation, containerNode) {',
     '    if (!containerNode) return;',
@@ -1593,12 +1881,34 @@ html_page_js <- function() {
     '      appendParagraph(containerNode, "detail-explanation__text", "No explanation notes for this step.");',
     '      return;',
     '    }',
-    '    var parts = text.split(/\\n+/).map(function(part) { return part.trim(); }).filter(Boolean);',
+    '    var parts = parseItems(text, "newline");',
     '    if (parts.length <= 1) {',
     '      appendParagraph(containerNode, "detail-explanation__text", text);',
     '      return;',
     '    }',
-    '    appendList(containerNode, "ul", "detail-explanation__list", parts);',
+    '    appendExpandableList(containerNode, parts, { ordered: false, className: "detail-explanation__list", visible: 6 });',
+    '  }',
+    '  function renderMetaValue(value, containerNode, mode) {',
+    '    if (!containerNode) return;',
+    '    clearNode(containerNode);',
+    '    var text = (value || "").trim();',
+    '    if (!text) return;',
+    '    var parts = parseItems(text, mode || "text");',
+    '    if (parts.length <= 1 || mode === "text") {',
+    '      appendParagraph(containerNode, "detail-meta__text", text);',
+    '      return;',
+    '    }',
+    '    appendExpandableList(containerNode, parts, { ordered: false, className: "detail-meta__list", visible: 8 });',
+    '  }',
+    '  function setMeta(rowNode, valueNode, value, mode) {',
+    '    if (!rowNode || !valueNode) return;',
+    '    if ((value || "").trim()) {',
+    '      rowNode.style.display = "grid";',
+    '      renderMetaValue(value, valueNode, mode);',
+    '    } else {',
+    '      rowNode.style.display = "none";',
+    '      clearNode(valueNode);',
+    '    }',
     '  }',
     '  function setCodeChunk(code) {',
     '    var text = (code || "").trim();',
@@ -1612,46 +1922,41 @@ html_page_js <- function() {
     '    detailMap.phase.textContent = button.dataset.phase || "";',
     '    detailMap.kind.textContent = button.dataset.kind || "";',
     '    detailMap.title.textContent = button.dataset.title || "";',
-    '    detailMap.narrative.textContent = button.dataset.narrative || "";',
+    '    detailMap.narrative.textContent = button.dataset.summary || button.dataset.narrative || "";',
     '    renderDetailCallout(button.dataset.detail || "", detailMap.callout);',
     '    renderDetailExplanation(button.dataset.explanation || "", detailMap.explanationBlock);',
     '    setCodeChunk(button.dataset.code || "");',
-    '    setMeta(detailMap.sourceRow, detailMap.source, button.dataset.source || "");',
-    '    setMeta(detailMap.outputRow, detailMap.output, button.dataset.output || "");',
-    '    setMeta(detailMap.targetRow, detailMap.target, button.dataset.target || "");',
-    '    setMeta(detailMap.supersededRow, detailMap.superseded, button.dataset.supersededBy ? ("Step " + button.dataset.supersededBy) : "");',
-    '    setMeta(detailMap.inputColumnsRow, detailMap.inputColumns, button.dataset.inputColumns || "");',
-    '    setMeta(detailMap.outputColumnsRow, detailMap.outputColumns, button.dataset.outputColumns || "");',
-    '    setMeta(detailMap.carriedColumnsRow, detailMap.carriedColumns, button.dataset.carriedColumns || "");',
-    '    setMeta(detailMap.createdColumnsRow, detailMap.createdColumns, button.dataset.createdColumns || "");',
+    '    setMeta(detailMap.sourceRow, detailMap.source, button.dataset.source || "", "comma");',
+    '    setMeta(detailMap.outputRow, detailMap.output, button.dataset.output || "", "text");',
+    '    setMeta(detailMap.targetRow, detailMap.target, button.dataset.target || "", "text");',
+    '    setMeta(detailMap.supersededRow, detailMap.superseded, button.dataset.supersededBy ? ("Step " + button.dataset.supersededBy) : "", "text");',
+    '    setMeta(detailMap.inputColumnsRow, detailMap.inputColumns, button.dataset.inputColumns || "", "comma");',
+    '    setMeta(detailMap.outputColumnsRow, detailMap.outputColumns, button.dataset.outputColumns || "", "comma");',
+    '    setMeta(detailMap.carriedColumnsRow, detailMap.carriedColumns, button.dataset.carriedColumns || "", "comma");',
+    '    setMeta(detailMap.createdColumnsRow, detailMap.createdColumns, button.dataset.createdColumns || "", "comma");',
     '  }',
+    '  var zoomController = setupGraphZoom(graphFrame, { label: "graphZoomLabel" });',
+    '  bindToolbar(zoomController, { out: "graphZoomOutButton", inn: "graphZoomInButton", fit: "graphFitButton", actual: "graphActualButton" });',
     '  viewButtons.forEach(function(button) {',
-      '    button.addEventListener("click", function() {',
-        '      setView(button.getAttribute("data-view-target"));',
-      '    });',
+    '    button.addEventListener("click", function() {',
+    '      setView(button.getAttribute("data-view-target"));',
+    '      if (button.getAttribute("data-view-target") === "graph" && zoomController) zoomController.fit();',
+    '    });',
     '  });',
     '  phaseExpandButtons.forEach(function(button) {',
-      '    button.addEventListener("click", function() {',
-        '      var group = button.closest(".phase-group");',
-        '      if (!group) return;',
-        '      var expanded = group.classList.toggle("is-expanded");',
-        '      button.textContent = expanded ? (button.getAttribute("data-expanded-label") || "Show fewer steps") : (button.getAttribute("data-collapsed-label") || "Show more steps");',
-        '      button.setAttribute("aria-expanded", expanded ? "true" : "false");',
-      '    });',
-    '  });',
-    '  if (resetButton && graphFrame) {',
-      '    resetButton.addEventListener("click", function() {',
-        '      graphFrame.scrollTo({ top: 0, left: 0, behavior: "smooth" });',
-    '    });',
-    '  }',
-    '  stepButtons.forEach(function(button) {',
     '    button.addEventListener("click", function() {',
-    '      activateStep(button);',
+    '      var group = button.closest(".phase-group");',
+    '      if (!group) return;',
+    '      var expanded = group.classList.toggle("is-expanded");',
+    '      button.textContent = expanded ? (button.getAttribute("data-expanded-label") || "Show fewer steps") : (button.getAttribute("data-collapsed-label") || "Show more steps");',
+    '      button.setAttribute("aria-expanded", expanded ? "true" : "false");',
     '    });',
     '  });',
-    '  if (stepButtons.length > 0) {',
-      '    activateStep(stepButtons[0]);',
-    '  }',
+    '  if (resetButton && zoomController) resetButton.addEventListener("click", function() { zoomController.fit(); });',
+    '  stepButtons.forEach(function(button) {',
+    '    button.addEventListener("click", function() { activateStep(button); });',
+    '  });',
+    '  if (stepButtons.length > 0) activateStep(stepButtons[0]);',
     '})();'
   ), collapse = "\n")
 }

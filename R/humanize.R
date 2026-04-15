@@ -9,6 +9,8 @@ human_action <- function(fn) {
   if (fn %in% c("read_delim", "read_fwf", "fread", "vroom")) return("Load data file")
   if (fn %in% c("read_excel", "read.xlsx", "read_xlsx")) return("Load Excel file")
   if (fn %in% c("readRDS")) return("Load R data file")
+  if (fn %in% c("load")) return("Load R workspace file")
+  if (fn %in% c("data")) return("Load packaged dataset")
   if (fn %in% c("fromJSON")) return("Load JSON file")
   if (fn %in% c("dbGetQuery")) return("Run database query")
   if (fn %in% c("dbReadTable")) return("Load database table")
@@ -18,6 +20,7 @@ human_action <- function(fn) {
   if (fn %in% c("read_parquet")) return("Load Parquet file")
   if (fn %in% c("read_feather")) return("Load Feather file")
   if (fn %in% c("read_csv_arrow")) return("Load CSV file")
+  if (fn %in% c("Load10X_Spatial")) return("Load spatial transcriptomics data")
   if (fn %in% c("c")) return("Create reference vector")
   if (fn %in% c("dir", "list.files")) return("Discover source data files")
   if (fn %in% c("vector")) return("Prepare collection")
@@ -59,7 +62,14 @@ human_action <- function(fn) {
   if (fn %in% c("predict")) return("Score records with model")
   if (fn %in% c("ifelse", "case_when")) return("Create conditional value")
   if (fn %in% c("cut")) return("Bucket values")
+  if (fn %in% c("PercentageFeatureSet")) return("Calculate feature percentages")
+  if (fn %in% c("AddMetaData")) return("Add metadata columns")
+  if (fn %in% c("GetTissueCoordinates")) return("Extract tissue coordinates")
+  if (fn %in% c("SCTransform")) return("Normalize spatial counts")
   if (fn %in% c("ggplot")) return("Create chart")
+  if (fn %in% c("SpatialFeaturePlot")) return("Create spatial feature plot")
+  if (fn %in% c("SpatialDimPlot")) return("Create spatial tissue plot")
+  if (fn %in% c("VlnPlot")) return("Create violin plot")
   if (fn %in% c("e_charts")) return("Create chart")
   if (fn %in% c("e_bar", "e_line", "e_scatter", "e_area", "e_pie")) return("Add chart layer")
   if (fn %in% c("e_title")) return("Label chart")
@@ -203,6 +213,9 @@ r_function_note <- function(fn) {
     dir = "dir() searches a folder and returns file names or file paths that match the requested pattern.",
     list.files = "list.files() searches a folder and returns file names or file paths that match the requested pattern.",
     fromJSON = "fromJSON() reads a JSON file and converts it into R data; flatten = TRUE spreads nested JSON fields into regular columns where possible.",
+    load = "load() reads one or more R objects from an `.RData` or `.rda` file into the current session.",
+    data = "data() loads an example or packaged dataset that ships with an installed R package.",
+    Load10X_Spatial = "Load10X_Spatial() reads a 10x Visium/Space Ranger output folder into a Seurat spatial object.",
     vector = "vector() creates an empty container; here it is used to prepare a list that will hold imported files.",
     bind_rows = "bind_rows() stacks many imported tables into one combined data frame.",
     c = "c() combines values into a vector, often used as a reusable list of labels or filter values.",
@@ -237,6 +250,13 @@ r_function_note <- function(fn) {
     lm = "lm() fits a linear model that estimates one outcome from one or more predictors.",
     glm = "glm() fits a generalized linear model for outcomes that need non-normal assumptions, such as binary or count outcomes.",
     predict = "predict() applies a fitted model to data to generate predicted values.",
+    PercentageFeatureSet = "PercentageFeatureSet() calculates the percentage of counts or features that match a pattern for each cell or spot.",
+    AddMetaData = "AddMetaData() attaches a new metadata column to the main object so it can be grouped, filtered, or plotted later.",
+    GetTissueCoordinates = "GetTissueCoordinates() extracts the x/y spot coordinates from a spatial object.",
+    SCTransform = "SCTransform() normalizes expression data and models technical variation so downstream comparisons are more stable.",
+    SpatialFeaturePlot = "SpatialFeaturePlot() shows where selected genes or metrics appear across the tissue image.",
+    SpatialDimPlot = "SpatialDimPlot() shows the spatial layout of spots or cells, optionally colored by groups or annotations.",
+    VlnPlot = "VlnPlot() compares the distribution of one or more metrics across groups with violin plots.",
     ""
   )
 }
@@ -515,6 +535,85 @@ transform_detail <- function(fn, args, raw_text = "") {
 
   if (fn %in% c("lm", "glm")) {
     return(model_detail(fn, args))
+  }
+
+  if (fn %in% c("Load10X_Spatial")) {
+    dir_arg <- named_arg_value(args, "data.dir")
+    file_arg <- named_arg_value(args, "filename")
+    slice_arg <- named_arg_value(args, "slice")
+    pieces <- c()
+    if (nzchar(dir_arg)) {
+      pieces <- c(pieces, paste0("read spatial data from ", humanize_expression(dir_arg)))
+    } else {
+      pieces <- c(pieces, "read spatial data from the provided folder")
+    }
+    if (nzchar(file_arg)) {
+      pieces <- c(pieces, paste0("use file ", humanize_expression(file_arg)))
+    }
+    if (nzchar(slice_arg)) {
+      pieces <- c(pieces, paste0("label the slice as ", humanize_expression(slice_arg)))
+    }
+    return(paste(pieces, collapse = "; "))
+  }
+
+  if (fn %in% c("PercentageFeatureSet")) {
+    pattern_arg <- if (length(args) > 1L) args[[2]] else ""
+    name_arg <- named_arg_value(args, "col.name")
+    detail <- "calculate a per-cell or per-spot percentage metric"
+    if (nzchar(pattern_arg)) {
+      detail <- paste0(detail, " for features matching ", humanize_expression(pattern_arg))
+    }
+    if (nzchar(name_arg)) {
+      detail <- paste0(detail, " and store it as ", humanize_expression(name_arg))
+    }
+    return(detail)
+  }
+
+  if (fn %in% c("AddMetaData")) {
+    col_arg <- named_arg_value(args, "col.name")
+    if (nzchar(col_arg)) {
+      return(paste0("attach a metadata column named ", humanize_expression(col_arg), " to the current object"))
+    }
+    return("attach additional metadata to the current object")
+  }
+
+  if (fn %in% c("GetTissueCoordinates")) {
+    scale_arg <- named_arg_value(args, "scale")
+    if (nzchar(scale_arg)) {
+      return(paste0("extract tissue coordinates at the ", humanize_expression(scale_arg), " image scale"))
+    }
+    return("extract tissue coordinates from the current spatial object")
+  }
+
+  if (fn %in% c("SCTransform")) {
+    assay_arg <- named_arg_value(args, "assay")
+    method_arg <- named_arg_value(args, "method")
+    detail <- "normalize the current expression data"
+    if (nzchar(assay_arg)) {
+      detail <- paste0(detail, " using the ", humanize_expression(assay_arg), " assay")
+    }
+    if (nzchar(method_arg)) {
+      detail <- paste0(detail, " with the ", humanize_expression(method_arg), " method")
+    }
+    return(detail)
+  }
+
+  if (fn %in% c("SpatialFeaturePlot", "SpatialDimPlot", "VlnPlot")) {
+    feature_arg <- named_arg_value(args, "features")
+    group_arg <- named_arg_value(args, "group.by")
+    detail <- switch(
+      fn,
+      SpatialFeaturePlot = "show selected genes or metrics across the tissue image",
+      SpatialDimPlot = "show the tissue layout with spots colored by grouping information",
+      VlnPlot = "compare the distribution of selected metrics across groups"
+    )
+    if (nzchar(feature_arg)) {
+      detail <- paste0(detail, "; features = ", humanize_expression(feature_arg))
+    }
+    if (nzchar(group_arg)) {
+      detail <- paste0(detail, "; group by ", humanize_expression(group_arg))
+    }
+    return(detail)
   }
 
   if (fn %in% c("bind_rows")) {

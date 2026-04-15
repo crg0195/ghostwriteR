@@ -36,7 +36,9 @@ test_that("R parser step metadata stays aligned with SQL parser fields", {
   steps <- parsed$steps
 
   expect_true(all(c("group", "input_columns", "output_columns") %in% names(steps)))
-  expect_true(all(steps$group == ""))
+  expect_false(any(is.na(steps$group)))
+  expect_equal(steps$group[[1]], "Inputs")
+  expect_equal(steps$group[[nrow(steps)]], "Outputs")
   expect_true(all(steps$input_columns == ""))
   expect_true(all(steps$output_columns == ""))
 })
