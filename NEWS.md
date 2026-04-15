@@ -1,5 +1,10 @@
 # ghostwriteR news
 
+## ghostwriteR 0.0.9
+
+- Fixed a bundled HTML regression that could break all click interactions by emitting malformed inline JavaScript in the generated page.
+- Added regression coverage around the exported HTML interaction script so broken escaping is caught before release.
+
 ## ghostwriteR 0.0.8
 
 - Improved HTML readability for large workflows with expandable step details, expandable inventories, and visible graph zoom controls in both bundled and graph-only HTML outputs.

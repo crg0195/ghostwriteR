@@ -24,6 +24,7 @@ test_that("ghostwriteR exports a self-contained html page with timeline and grap
   expect_match(html, 'renderDetailCallout', fixed = TRUE)
   expect_match(html, 'detail-list', fixed = TRUE)
   expect_match(html, 'detail-more', fixed = TRUE)
+  expect_false(grepl('ch === """', html, fixed = TRUE))
   expect_match(html, 'graphZoomInButton', fixed = TRUE)
   expect_match(html, 'graphFitButton', fixed = TRUE)
   expect_match(html, 'filtered_sales.csv', fixed = TRUE)
